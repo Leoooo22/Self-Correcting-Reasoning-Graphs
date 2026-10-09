@@ -2,11 +2,7 @@ from reasoning_node import ReasoningNode
 from step_generator import MockGenerator
 from config import SearchConfig
 from tree_search import expand
-
-PROBLEM = """Problem: Given an array of integers nums and an integer target,
-return the indices of the two numbers that add up to target.
-You may assume that each input has exactly one solution.
-def two_sum(nums: list[int], target: int) -> list[int]:"""
+from problems import TWO_SUM
 
 HASH_MAP_CODE = """```python
 def two_sum(nums, target):
@@ -66,7 +62,7 @@ def main():
     config = SearchConfig()
     # Seed chosen so that the root sees an empty step and an early code step
     generator = MockGenerator(STEP_CANDIDATES, CODE_CANDIDATES, seed=6)
-    root = ReasoningNode(PROBLEM)
+    root = ReasoningNode(TWO_SUM.to_prompt())
 
     # Expand level by level until no node is left to expand.
     # This always terminates: at max depth expand forces code, and code nodes are terminal.
