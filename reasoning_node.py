@@ -10,6 +10,7 @@ class ReasoningNode:
         self.children = []
         self.depth = 0 if parent is None else 1 + parent.depth
         self.score = None
+        self.code = None
         self.is_terminal = False
 
     def add_child(self, step_text):
@@ -48,7 +49,8 @@ class ReasoningNode:
             child.print_tree(indent + 1)
 
     def __repr__(self):
-        short_text = self.step_text[:40]
-        if len(self.step_text) > 40:
+        one_line = self.step_text.replace("\n", "⏎")
+        short_text = one_line[:40]
+        if len(one_line) > 40:
             short_text += "..."
         return f'(id={self.id}, depth={self.depth}, score={self.score}, terminal={self.is_terminal}, text="{short_text}")'
