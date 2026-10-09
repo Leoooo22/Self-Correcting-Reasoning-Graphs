@@ -71,7 +71,7 @@ File: `reasoning_node.py`. Pure data structure, with no model or search logic.
 
 ### 4.2 `StepGenerator`: step generator
 File: `step_generator.py`. Abstract interface: `generate_steps(prompt: str, n: int) -> list[str]`.
-- `MockGenerator` ✅ done: candidates per level + seed. **Needs adapting**: it currently infers the level by counting lines, which breaks with multi-line problems and steps.
+- `MockGenerator` ✅ done: `step_candidates` (one list per level) + `code_candidates` (code blocks without label) + seed. Prompt ending with `Code:` → unlabelled code; otherwise level = number of lines starting with `Step`; candidates exhausted → labelled code.
 - `HFGenerator`: small model via `transformers` on the Mac (e.g. `Qwen2.5-Coder-0.5B/1.5B-Instruct`).
 - `VLLMGenerator`: same model with vLLM on a cloud GPU (prefix caching for the tree's shared prefixes).
 
@@ -79,18 +79,62 @@ Every generator must produce diverse alternatives (sampling with temperature > 0
 
 ### 4.3 `expand`: growing the tree ✅ done
 File: `tree_search.py`. `expand(node, generator, k) -> list[ReasoningNode]`: skips terminal nodes, cleans, deduplicates, creates the children and marks terminal ones.
-**Needs adapting**: terminal detection (currently `ANSWER_PREFIX = "Answer:"`) must become pluggable, because for code the terminal step is the one containing the final code.
+Now `expand(node, generator, config)`: uses the parser from `step_format.py`, forces code at `max_steps` (adding `Code:` to the prompt and back to the outputs), takes the branching from `SearchConfig`, deduplicates on the formatted text, stores the extracted code in terminal nodes. Full demo on Two Sum in `main.py`.
 
-### 4.4 Step format 🔲 to be decided
-- Step = natural-language reasoning step (e.g. "Use a hash map from value to index").
-- Last step = complete code in a ```` ```python ```` block.
-- A step separator more robust than a newline (to be defined).
-- **Small maximum depth** (2–3 steps + code), with more breadth at the first level, where the strategy is chosen.
+### 4.4 Step format ✅ decided
+Guiding principle: **never trust the model's output** — parse and validate it, discard what is malformed.
 
-### 4.5 Problems and test cases 🔲
-- Problem structure: statement, function signature, **public tests** (2–3, like the examples in the statement), **hidden tests** (all the others).
-- Test format: function call with arguments → expected output (LeetCode style).
-- First toy problem: **Two Sum**, with hand-written tests.
+**Labels.**
+- Reasoning step: `Step N: <natural-language text>` (e.g. `Step 1: Use a hash map from value to index.`).
+- Final step: `Code:` followed by a ```` ```python ```` block containing the complete solution.
+- The step number is **assigned by the system from the node depth**, not taken from the model.
+
+Example of a complete branch:
+````
+Problem: Given an array of integers nums and an integer target,
+return the indices of the two numbers that add up to target.
+def two_sum(nums: list[int], target: int) -> list[int]:
+
+Step 1: Use a hash map from value to index, so that each lookup is O(1).
+Step 2: For each element, check whether target - element is already in the map;
+if so, return the two indices, otherwise store the current element.
+Code:
+```python
+def two_sum(nums, target):
+    seen = {}
+    for i, x in enumerate(nums):
+        if target - x in seen:
+            return [seen[target - x], i]
+        seen[x] = i
+```
+````
+
+**Maximum depth.**
+- Below the maximum depth, the prompt ends with **no label**: the model chooses whether to write another `Step` or the `Code:`.
+- At the maximum depth, the prompt ends with `Code:`: the model is **forced** to write the code. Any other step is discarded.
+- This guarantees that every branch terminates (required for rollouts).
+
+**Parser** (single function, used by everyone):
+- detects the step type from the label (`Step` / `Code:`);
+- **truncates** extra content (a following `Step`/`Code:`; anything after the closing ```` ``` ```` of the code block);
+- **validates**: reasoning step not empty; code step contains a ```` ```python ```` block whose content passes `ast.parse` (syntax check without execution); at maximum depth only code is valid;
+- returns the parsed step, or `None` if malformed (then `expand` discards it).
+
+**Module.** Constants (`STEP_PREFIX`, `CODE_PREFIX`), the parser and, later, the prompt builder live in a single module, `step_format.py`, shared by `expand`, the mock, rollouts and real generators.
+
+**Parameters.** Collected in a `SearchConfig` dataclass with defaults. Branching factor per level as a list (e.g. `[4, 2, 2]`): wide at the first level (strategy choice), narrow afterwards; its length is the maximum number of reasoning steps. Beam width, number of rollouts and temperature will be added to the same config.
+
+**Node.** `step_text` stores the step with its label, so `get_full_text()` works unchanged. Terminal (code) nodes may also store the extracted code in a `code` attribute.
+
+**Note for real generators.** The real model will not receive only `get_full_text()`, but also instructions on the format and a complete example (few-shot), built by a prompt-builder function in `step_format.py`. The mock does not need it.
+
+### 4.5 Problems and test cases ✅ done (Two Sum)
+- `problem.py`: `TestCase(args, expected)` and `Problem(name, statement, function_name, signature, public_tests, hidden_tests)`.
+- Test format: function call with **positional** arguments → expected output (LeetCode style). Positional, so that a correct solution with different parameter names still passes. Only JSON-friendly values (numbers, strings, lists, booleans, `None`).
+- `Problem.to_prompt()`: statement + `Examples:` built from the **public tests only** + signature. Hidden tests never reach the model.
+- Ambiguous outputs are removed in the statement (e.g. "Return the two indices in increasing order") so that tests can compare with `==`.
+- `problems.py`: `TWO_SUM` with 2 public and 5 hidden tests (each hidden test targets a typical bug); the tests are checked against a reference solution.
+- Later: one adapter per dataset converts its format into `Problem`/`TestCase`, with an automatic public/hidden split; `TestCase` may need an extra kind (raw `assert`) for some datasets.
 - Then public datasets (from Hugging Face, `datasets` library): MBPP, HumanEval, then LeetCodeDataset / LiveCodeBench.
 
 ### 4.6 `CodeExecutor`: safe execution 🔲
@@ -165,8 +209,8 @@ When a terminal node's code fails the public tests, the outcome (input, expected
 | # | Step | Status |
 |---|---|---|
 | 0 | `ReasoningNode`, `StepGenerator` + `MockGenerator`, `expand` | ✅ done |
-| 1 | Step format + Two Sum with hand-written tests (public/hidden); adapt mock and terminal detection | 🔲 next |
-| 2 | `CodeExecutor` (separate process + timeout) | 🔲 |
+| 1 | Step format (§4.4): `step_format.py` + `SearchConfig`, adapt mock and `expand`, Two Sum demo; `Problem`/`TestCase` with Two Sum tests (§4.5) | ✅ done |
+| 2 | `CodeExecutor` (separate process + timeout) | 🔲 next |
 | 3 | `HFGenerator` with a small coder model | 🔲 |
 | 4 | `Evaluator` + `RolloutEvaluator` | 🔲 |
 | 5 | Beam search | 🔲 |
@@ -181,9 +225,8 @@ Steps 1–6 make up the complete project; 7–8 are the added value.
 
 ## 10. Open decisions
 
-- Step separator and exact prompt format.
-- Maximum depth and number of children per level.
-- Criterion for detecting the final step (code block).
-- Number of rollouts per node (cost vs noise).
+- Exact prompt wording and few-shot example for real generators (the step format itself is decided, §4.4).
+- Default values for the per-level branching and maximum depth (to be tuned by experiments; starting point `[4, 2, 2]`).
+- Number of rollouts per node (cost vs noise); all-or-nothing vs partial credit on tests.
 - Number of public tests per problem.
 - Starting dataset (MBPP or HumanEval).
