@@ -3,6 +3,8 @@ from step_generator import MockGenerator
 from config import SearchConfig
 from tree_search import expand
 from problems import TWO_SUM
+from executor import CodeExecutor
+from step_format import extract_code
 
 HASH_MAP_CODE = """```python
 def two_sum(nums, target):
@@ -79,9 +81,29 @@ def main():
 
     terminals = [node for node in all_nodes if node.is_terminal]
     print(f"\n{len(all_nodes)} nodes, {len(terminals)} terminal (code) nodes\n")
+
+    # Grade every code leaf on the PUBLIC tests only, as the search will do
+    executor = CodeExecutor()
+    public_results = {}
     for node in terminals:
-        print(f"--- code of node {node.id} (depth {node.depth}) ---")
-        print(node.code)
+        result = executor.run(node.code, TWO_SUM.function_name, TWO_SUM.public_tests)
+        public_results[node.id] = result
+        first_step = node.get_path()[1]
+        strategy = "(code written directly)" if first_step is node else first_step.step_text[:45]
+        verdict = "PASS" if result.all_passed else "FAIL"
+        print(f"node {node.id:>2}  {verdict}  {result.num_passed}/{len(result.results)} public  | {strategy}")
+        for r in result.results:
+            if r.status != "passed":
+                print(f"           {r.status}: {TWO_SUM.function_name}{tuple(r.test.args)} -> {r.actual!r}, expected {r.test.expected!r}")
+
+    # Pick a solution using the public tests, then measure it on the HIDDEN tests
+    chosen = next((node for node in terminals if public_results[node.id].all_passed), None)
+    if chosen is None:
+        print("\nNo code passes the public tests")
+    else:
+        hidden = executor.run(chosen.code, TWO_SUM.function_name, TWO_SUM.hidden_tests)
+        print(f"\nChosen: node {chosen.id} -> hidden tests: {hidden.num_passed}/{len(hidden.results)} passed")
+        print(chosen.code)
 
     # Sanity checks on the whole tree
     for node in all_nodes:
@@ -93,10 +115,12 @@ def main():
         if node.is_terminal:
             assert BROKEN_LINE not in node.code, f"syntax error accepted: {node}"
 
-    codes = {node.code for node in terminals}
-    wrong = WRONG_CODE.removeprefix("```python\n").removesuffix("\n```")
-    print("\nWrong-but-valid code present in the tree:", wrong in codes)
-    print("All checks passed")
+    # The executor must reject exactly the wrong-but-valid code
+    wrong = extract_code(WRONG_CODE)
+    for node in terminals:
+        assert public_results[node.id].all_passed == (node.code != wrong), f"wrong verdict: {node}"
+    assert chosen is not None and hidden.all_passed
+    print("\nAll checks passed")
 
 
 if __name__ == "__main__":
