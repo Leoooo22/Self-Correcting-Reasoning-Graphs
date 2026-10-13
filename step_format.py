@@ -5,6 +5,32 @@ from dataclasses import dataclass
 STEP_PREFIX = "Step"
 CODE_PREFIX = "Code:"
 
+# Prompt for real generators: format rules + one solved example (few-shot)
+SYSTEM_PROMPT = (
+    "Solve the programming problem one step at a time. "
+    "Write each reasoning step on a single line starting with 'Step N:', describing the plan in words, without code. "
+    "When the plan is complete, write 'Code:' followed by a ```python block containing the complete function. "
+    "Write nothing else: no explanations, no usage examples, no prints."
+)
+
+FEW_SHOT_PROBLEM = """Problem: Return the largest element of a non-empty list of integers.
+Examples:
+largest([3, 1, 4]) -> 4
+largest([-5, -2]) -> -2
+def largest(nums: list[int]) -> int:"""
+
+FEW_SHOT_SOLUTION = """Step 1: Keep the largest value seen so far, starting from the first element.
+Step 2: Scan the list and update that value whenever a larger element appears.
+Code:
+```python
+def largest(nums):
+    best = nums[0]
+    for x in nums:
+        if x > best:
+            best = x
+    return best
+```"""
+
 
 @dataclass
 class ParsedStep:
@@ -56,6 +82,31 @@ def format_step(parsed: ParsedStep, depth: int) -> str:
     if parsed.is_code:
         return f"{CODE_PREFIX}\n```python\n{parsed.code}\n```"
     return f"{STEP_PREFIX} {depth}: {parsed.text}"
+
+
+def split_prompt(full_text: str) -> tuple[str, str]:
+    lines = full_text.splitlines()
+    for i, line in enumerate(lines):
+        if line.startswith(STEP_PREFIX) or line.startswith(CODE_PREFIX):
+            problem = "\n".join(lines[:i])
+            steps = "\n".join(lines[i:])
+            return problem, steps
+    return full_text, ""
+
+
+def build_messages(full_text: str) -> list[dict]:
+    problem, steps = split_prompt(full_text)
+
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": FEW_SHOT_PROBLEM},
+        {"role": "assistant", "content": FEW_SHOT_SOLUTION},
+        {"role": "user", "content": problem},
+    ]
+
+    if steps:
+        messages.append({"role": "assistant", "content": steps + "\n"})
+    return messages
 
 
 if __name__ == "__main__":
@@ -112,3 +163,27 @@ def two_sum(nums, target:
             print(f"    got:      {result!r}")
 
     print(f"\n{len(cases) - failures}/{len(cases)} passed")
+
+    from problems import TWO_SUM
+
+    print(FEW_SHOT_PROBLEM)
+    print("---")
+    print(TWO_SUM.to_prompt())
+
+    assert extract_code(FEW_SHOT_SOLUTION) is not None, "the few-shot solution has no valid code block"
+    print("few-shot example: OK")
+
+    # build_messages: the problem always goes in the 4th message, the steps (if any) in a 5th one
+    root = TWO_SUM.to_prompt()
+    # (description, full text, expected number of messages, expected content of the last message)
+    message_cases = [
+        ("root", root, 4, root),
+        ("with steps", root + "\nStep 1: A\nStep 2: B", 5, "Step 1: A\nStep 2: B\n"),
+        ("forced code", root + "\nStep 1: A\nCode:", 5, "Step 1: A\nCode:\n"),
+    ]
+    for description, text, expected_count, expected_last in message_cases:
+        messages = build_messages(text)
+        assert len(messages) == expected_count, f"{description}: wrong number of messages"
+        assert messages[-1]["content"] == expected_last, f"{description}: wrong last message"
+        assert messages[3]["content"] == root, f"{description}: the problem is not in the 4th message"
+        print(f"[PASS] build_messages: {description}")
