@@ -137,9 +137,14 @@ def two_sum(nums, target):
 - Later: one adapter per dataset converts its format into `Problem`/`TestCase`, with an automatic public/hidden split; `TestCase` may need an extra kind (raw `assert`) for some datasets.
 - Then public datasets (from Hugging Face, `datasets` library): MBPP, HumanEval, then LeetCodeDataset / LiveCodeBench.
 
-### 4.6 `CodeExecutor`: safe execution 🔲
-- Runs the generated code in a **separate process** (`subprocess`) with a **timeout**.
-- Returns, for each test: passed / failed / error, plus details (input, expected output, actual output, traceback). These are needed for the repair step.
+### 4.6 `CodeExecutor`: safe execution ✅ done
+Two programs talking through stdin/stdout in JSON:
+- `runner.py` (separate process): reads `{code, function_name, tests}`, `exec`s the code in its own namespace, calls the function with positional args on each test, normalizes the result through JSON (tuple → list), compares with `==`. Model prints are redirected away from stdout; `Exception` and `SystemExit` are caught. Writes `{"results": [{status, actual, error}]}`.
+- `executor.py`: `CodeExecutor(timeout=5.0).run(code, function_name, tests) -> ExecutionResult`. Launches the runner with `sys.executable` in a temporary working directory. Timeout → every test `"timeout"`; runner dying without valid JSON (e.g. `os._exit`) → every test `"error"` with exit code and stderr tail.
+- `TestResult(test, status, actual, error)`, status ∈ `passed | failed | error | timeout`; `ExecutionResult.num_passed`, `.all_passed` (`False` when there are no tests).
+- One process for all the tests of a run (cheaper than one per test).
+- Security note: a separate process protects against hangs and crashes, not against malicious file access; a real sandbox (container) is a possible later improvement.
+- `main.py` grades every leaf of the demo tree on the public tests, picks a passing one and measures it on the hidden tests.
 
 ### 4.7 `Evaluator`: node evaluation 🔲
 Abstract interface that assigns a score in [0, 1] to a node.
@@ -210,8 +215,8 @@ When a terminal node's code fails the public tests, the outcome (input, expected
 |---|---|---|
 | 0 | `ReasoningNode`, `StepGenerator` + `MockGenerator`, `expand` | ✅ done |
 | 1 | Step format (§4.4): `step_format.py` + `SearchConfig`, adapt mock and `expand`, Two Sum demo; `Problem`/`TestCase` with Two Sum tests (§4.5) | ✅ done |
-| 2 | `CodeExecutor` (separate process + timeout) | 🔲 next |
-| 3 | `HFGenerator` with a small coder model | 🔲 |
+| 2 | `CodeExecutor` (separate process + timeout) | ✅ done |
+| 3 | `HFGenerator` with a small coder model | 🔲 next |
 | 4 | `Evaluator` + `RolloutEvaluator` | 🔲 |
 | 5 | Beam search | 🔲 |
 | 6 | Baselines (single, Best-of-N) and comparison on MBPP / HumanEval | 🔲 |
