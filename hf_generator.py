@@ -1,8 +1,26 @@
 import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM, set_seed
+from transformers import AutoTokenizer, AutoModelForCausalLM, set_seed, StoppingCriteria, StoppingCriteriaList
 
 from step_generator import StepGenerator
-from step_format import build_messages
+from step_format import build_messages, STEP_PREFIX, CODE_PREFIX
+
+
+class StopAtNextStep(StoppingCriteria):
+    """Stops each sequence as soon as its new text starts another step."""
+
+    def __init__(self, tokenizer, prompt_length: int):
+        self.tokenizer = tokenizer
+        self.prompt_length = prompt_length
+
+    # Called by generate after every token: one True/False per sequence (True = stop it)
+    def __call__(self, input_ids, scores, **kwargs):
+        # Look only at the new tokens: the prompt itself ends with "\n" and must not trigger a stop
+        new_tokens = input_ids[:, self.prompt_length:]
+        texts = self.tokenizer.batch_decode(new_tokens)
+        done = []
+        for text in texts:
+            done.append(("\n" + STEP_PREFIX) in text or ("\n" + CODE_PREFIX) in text)
+        return torch.tensor(done, device=input_ids.device)
 
 
 class HFGenerator(StepGenerator):
@@ -29,10 +47,11 @@ class HFGenerator(StepGenerator):
         else:
             text = self.tokenizer.apply_chat_template(messages, tokenize=False, continue_final_message=True)
 
-        # 3. Text -> token ids
+        # 3. Text -> token ids; the prompt length tells where the new tokens start
         inputs = self.tokenizer(text, return_tensors="pt").to(self.device)
+        prompt_length = inputs["input_ids"].shape[1]
 
-        # 4. Sample n answers, one token at a time
+        # 4. Sample n answers, one token at a time; each one stops when it starts a further step
         with torch.no_grad():
             outputs = self.model.generate(
                 **inputs,
@@ -41,10 +60,10 @@ class HFGenerator(StepGenerator):
                 top_p=self.top_p,
                 max_new_tokens=self.max_new_tokens,
                 num_return_sequences=n,
+                stopping_criteria=StoppingCriteriaList([StopAtNextStep(self.tokenizer, prompt_length)]),
             )
 
         # 5. Each row is prompt + answer: keep the answer and decode it
-        prompt_length = inputs["input_ids"].shape[1]
         answers = []
         for sequence in outputs:
             new_tokens = sequence[prompt_length:]
