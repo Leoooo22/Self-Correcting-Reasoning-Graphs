@@ -1,6 +1,6 @@
 # Self-Correcting Reasoning Graphs: project specifications
 
-*Version 2: programming domain (LeetCode style). Supersedes the initial version based on math problems.*
+*Describes the current behavior of the code. Last updated: 2026-10-14.*
 
 ---
 
@@ -15,32 +15,14 @@ A system that solves **LeetCode-style** programming problems (problem statement 
 
 Problems don't have to come from LeetCode. What matters is that they follow the same style: a function to implement, visible examples, hidden tests.
 
----
-
-## 2. What changes compared to the math version
-
-| Aspect | Math version (initial) | Programming version (current) |
-|---|---|---|
-| Problems | Arithmetic / math | LeetCode-style coding problems |
-| Step | One calculation per line | One natural-language reasoning step; the last step is the code |
-| End of branch | Line starting with `Answer:` | Step containing the final code (a ```` ```python ```` block) |
-| Objective verification | Every step (only for explicit calculations) | Final code only, by running the tests |
-| Judge of intermediate steps | Pretrained PRM (e.g. `Qwen2.5-Math-PRM-7B`) | Phase 1: **rollouts + tests**. Phase 2: **our own trained PRM** |
-| Meaning of the score | "Is this step correct?" | "Starting from here, how likely is it to reach code that passes the tests?" (value model, Math-Shepherd style) |
-| Correction | Pruning + backtracking only | Pruning + backtracking + **repair step** driven by test errors |
-| New components | — | Safe code executor, public/hidden test handling, baselines |
-
-`ReasoningNode`, the `StepGenerator` interface, `expand` and the search setup stay **unchanged**: they are domain-independent.
+**Meaning of a node's score.** Not "is this step correct?", but "starting from here, how likely is it to reach code that passes the tests?" (a value model, Math-Shepherd style). Only the final code can be checked objectively, by running it.
 
 ---
 
-## 3. Scientific references
+## 2. Scientific references
 
-**Core (from the initial version)**
 - *Let's Verify Step by Step* (OpenAI): process supervision beats outcome-only supervision.
 - *Tree of Thoughts* (Yao et al.): tree search (BFS/DFS) with exploration, evaluation and backtracking.
-
-**Added for the programming version**
 - *Math-Shepherd*: intermediate step labels obtained automatically through rollouts; the basis for training our PRM.
 - *Planning with Large Language Models for Code Generation* (PG-TD): tree search with tests as the reward.
 - *Language Agent Tree Search* (LATS): tree + tests + reflection on errors.
@@ -49,55 +31,104 @@ Problems don't have to come from LeetCode. What matters is that they follow the 
 
 ---
 
-## 4. Architecture
+## 3. Architecture
+
+### 3.1 Overview
 
 ```
                 ┌──────────────────┐
-  Problem  ───▶ │   Search         │ ◀──── Evaluator (rollout / PRM)
-  + public      │ (beam search)    │              │
+  Problem  ───▶ │   Search         │ ◀──── Evaluator (rollout / PRM)        🔲
+  + public      │ (beam search) 🔲 │              │
   tests         └──────┬───────────┘              ▼
-                       │ expand            CodeExecutor (tests)
+                       │ expand ✅          CodeExecutor (tests) ✅
                        ▼
-                 StepGenerator (mock / HF / vLLM)
+                 StepGenerator: MockGenerator ✅ / HFGenerator ✅ / VLLMGenerator 🔲
                        │
                        ▼
-                 ReasoningNode (tree)
+                 ReasoningNode (tree) ✅
 ```
 
-### 4.1 `ReasoningNode`: tree node ✅ done
+### 3.2 Files
+
+| File | Contents | Depends on |
+|---|---|---|
+| `reasoning_node.py` | `ReasoningNode`: the tree | — |
+| `step_format.py` | Step labels, parser, formatter, prompt builder (system prompt, few-shot example, `split_prompt`, `build_messages`) | — |
+| `config.py` | `SearchConfig`: branching per level, maximum depth | — |
+| `step_generator.py` | `StepGenerator` interface, `MockGenerator` | `step_format` |
+| `hf_generator.py` | `HFGenerator` (real model via `transformers`), `StopAtNextStep` | `step_generator`, `step_format`, `torch`, `transformers` |
+| `tree_search.py` | `expand` | `reasoning_node`, `step_generator`, `config`, `step_format` |
+| `problem.py` | `TestCase`, `Problem` | — |
+| `problems.py` | Problem instances (`TWO_SUM`) | `problem` |
+| `runner.py` | Child process that executes model code on the tests | standard library only |
+| `executor.py` | `CodeExecutor`, `TestResult`, `ExecutionResult` | `problem`, `runner.py` (as a file) |
+| `main.py` | End-to-end demo with the mock generator | everything except `hf_generator` |
+
+`HFGenerator` lives in its own file so that the mock, the parser and their checks never need `torch` installed or loaded.
+
+### 3.3 One expansion, end to end
+
+```
+expand(node, generator, config)                                  tree_search.py
+  │ force_code = node.depth >= config.max_steps
+  │ k          = config.code_branching if force_code else config.branching[node.depth]
+  │ prompt     = node.get_full_text()  (+ "\nCode:" if force_code)
+  ▼
+generator.generate_steps(prompt, k)  →  k raw strings
+  │   HFGenerator: build_messages → chat template → tokenizer → generate (StopAtNextStep) → decode
+  ▼
+for each raw string:
+  │ if force_code: raw = "Code:\n" + raw        (the label was in the prompt)
+  │ parsed = parse_step(raw, force_code)        → None = discarded
+  │ text   = format_step(parsed, node.depth + 1) → canonical text, also the dedup key
+  ▼
+one child per distinct canonical text; code children are terminal and store .code
+```
+
+---
+
+## 4. Components (current behavior)
+
+### 4.1 `ReasoningNode`: the tree ✅
 File: `reasoning_node.py`. Pure data structure, with no model or search logic.
-- Attributes: `id`, `step_text`, `parent`, `children`, `depth`, `score` (`None` = not evaluated), `is_terminal`.
-- Methods: `add_child`, `get_path`, `get_full_text`, `path_score` (product, skips the root and `None`), `is_root`, `is_leaf`, `print_tree`, `__repr__`.
 
-### 4.2 `StepGenerator`: step generator
-File: `step_generator.py`. Abstract interface: `generate_steps(prompt: str, n: int) -> list[str]`.
-- `MockGenerator` ✅ done: `step_candidates` (one list per level) + `code_candidates` (code blocks without label) + seed. Prompt ending with `Code:` → unlabelled code; otherwise level = number of lines starting with `Step`; candidates exhausted → labelled code.
-- `HFGenerator`: small model via `transformers` on the Mac (e.g. `Qwen2.5-Coder-0.5B/1.5B-Instruct`).
-- `VLLMGenerator`: same model with vLLM on a cloud GPU (prefix caching for the tree's shared prefixes).
+**Attributes**
 
-Every generator must produce diverse alternatives (sampling with temperature > 0) and **one step per call** (stop sequence).
+| Attribute | Type | Meaning |
+|---|---|---|
+| `id` | `int` | Unique, from a class-level counter (`itertools.count`), in creation order |
+| `step_text` | `str` | Root: the problem text. Other nodes: the step **with its label**, in canonical form: `Step N: ...`, or `Code:` followed by the python block |
+| `parent` | `ReasoningNode \| None` | `None` for the root |
+| `children` | `list[ReasoningNode]` | In creation order |
+| `depth` | `int` | 0 for the root, parent depth + 1 otherwise |
+| `score` | `float \| None` | `None` = not evaluated yet (set by the future evaluator) |
+| `code` | `str \| None` | Extracted code (without the fences), only on terminal nodes |
+| `is_terminal` | `bool` | `True` for code nodes: they are never expanded |
 
-### 4.3 `expand`: growing the tree ✅ done
-File: `tree_search.py`. `expand(node, generator, k) -> list[ReasoningNode]`: skips terminal nodes, cleans, deduplicates, creates the children and marks terminal ones.
-Now `expand(node, generator, config)`: uses the parser from `step_format.py`, forces code at `max_steps` (adding `Code:` to the prompt and back to the outputs), takes the branching from `SearchConfig`, deduplicates on the formatted text, stores the extracted code in terminal nodes. Full demo on Two Sum in `main.py`.
+**Methods**
+- `add_child(step_text)`: creates the child, appends it to `children`, returns it.
+- `get_path()`: list of nodes from the root to this node, both included.
+- `get_full_text()`: the `step_text` of every node on the path joined with `"\n"`. This is what generators receive as the prompt. Since `step_text` stores the label, the result reads like a complete partial solution: problem, then `Step 1: ...`, `Step 2: ...`.
+- `path_score()`: product of the scores along the path, skipping the root and nodes with `score is None`; `1.0` if nothing is scored.
+- `is_root()`, `is_leaf()` (no children).
+- `print_tree(indent=0)`: recursive print, 4 spaces per level.
+- `__repr__`: `(id=…, depth=…, score=…, terminal=…, text="…")`, with the text on one line (`\n` shown as `⏎`) and cut at 40 characters.
 
-### 4.4 Step format ✅ decided
-Guiding principle: **never trust the model's output** — parse and validate it, discard what is malformed.
+### 4.2 Step format and parser ✅
+File: `step_format.py`. Guiding principle: **never trust the model's output** — parse and validate it, discard what is malformed. Everything about the format lives in this one module, shared by `expand`, the mock, `HFGenerator` and the checks: changing a label means changing one constant.
 
-**Labels.**
-- Reasoning step: `Step N: <natural-language text>` (e.g. `Step 1: Use a hash map from value to index.`).
-- Final step: `Code:` followed by a ```` ```python ```` block containing the complete solution.
-- The step number is **assigned by the system from the node depth**, not taken from the model.
+**Labels**: `STEP_PREFIX = "Step"`, `CODE_PREFIX = "Code:"`.
+- Reasoning step: `Step N: <natural-language text>`.
+- Final step: `Code:` on its own line, followed by a ```` ```python ```` block with the complete solution.
+- The step number is **assigned by the system from the node depth**, never taken from the model.
 
-Example of a complete branch:
+Example of a complete branch (what `get_full_text()` returns on the code node):
 ````
 Problem: Given an array of integers nums and an integer target,
-return the indices of the two numbers that add up to target.
+...
 def two_sum(nums: list[int], target: int) -> list[int]:
-
-Step 1: Use a hash map from value to index, so that each lookup is O(1).
-Step 2: For each element, check whether target - element is already in the map;
-if so, return the two indices, otherwise store the current element.
+Step 1: Use a hash map from value to index, so each lookup is O(1).
+Step 2: Store each value with its index while scanning the array.
 Code:
 ```python
 def two_sum(nums, target):
@@ -109,56 +140,198 @@ def two_sum(nums, target):
 ```
 ````
 
-**Maximum depth.**
-- Below the maximum depth, the prompt ends with **no label**: the model chooses whether to write another `Step` or the `Code:`.
-- At the maximum depth, the prompt ends with `Code:`: the model is **forced** to write the code. Any other step is discarded.
-- This guarantees that every branch terminates (required for rollouts).
+**`ParsedStep(is_code, text, code)`**: result of parsing. For a reasoning step `text` is the step without its label and `code` is `None`; for a code step both `text` and `code` hold the extracted code.
 
-**Parser** (single function, used by everyone):
-- detects the step type from the label (`Step` / `Code:`);
-- **truncates** extra content (a following `Step`/`Code:`; anything after the closing ```` ``` ```` of the code block);
-- **validates**: reasoning step not empty; code step contains a ```` ```python ```` block whose content passes `ast.parse` (syntax check without execution); at maximum depth only code is valid;
-- returns the parsed step, or `None` if malformed (then `expand` discards it).
+**`extract_code(text) -> str | None`**: finds the first ```` ```python ... ``` ```` block (non-greedy, across lines), strips it, and returns it only if `ast.parse` accepts it (syntax check, nothing is executed). No block, unclosed block or syntax error → `None`.
 
-**Module.** Constants (`STEP_PREFIX`, `CODE_PREFIX`), the parser and, later, the prompt builder live in a single module, `step_format.py`, shared by `expand`, the mock, rollouts and real generators.
+**`parse_step(raw, force_code) -> ParsedStep | None`** — rules, in order:
+1. Strip surrounding whitespace.
+2. If the text starts with `Code:` (case-insensitive): code step. Return it if `extract_code` succeeds, otherwise `None`. Anything after the closing fence is ignored.
+3. If `force_code` is true and the text is not a code step: `None` (at maximum depth only code is valid).
+4. Remove a leading `Step <optional number> :` label (case-insensitive, flexible spaces). A missing label is accepted: the text is taken as a step anyway.
+5. Truncate at the first following line that starts (after optional spaces) with `Step` or `Code:`: only the **first** step is kept. Lines in between that don't start with a label stay, so a step can span several lines.
+6. Empty after stripping → `None`.
 
-**Parameters.** Collected in a `SearchConfig` dataclass with defaults. Branching factor per level as a list (e.g. `[4, 2, 2]`): wide at the first level (strategy choice), narrow afterwards; its length is the maximum number of reasoning steps. Beam width, number of rollouts and temperature will be added to the same config.
+**`format_step(parsed, depth) -> str`**: canonical text stored in the node: `"Step {depth}: {text}"` or `"Code:\n```python\n{code}\n```"`. `expand` uses it as the deduplication key, so outputs that differ only in label, numbering or spacing collapse into one child.
 
-**Node.** `step_text` stores the step with its label, so `get_full_text()` works unchanged. Terminal (code) nodes may also store the extracted code in a `code` attribute.
+**Maximum depth.** Below `max_steps`, the prompt ends with no label and the generator chooses between another `Step` and `Code:`. At `max_steps`, `expand` appends `Code:` to the prompt: the model can only write code and any other output is discarded. Every branch therefore terminates, which rollouts require.
 
-**Note for real generators.** The real model will not receive only `get_full_text()`, but also instructions on the format and a complete example (few-shot), built by a prompt-builder function in `step_format.py`. The mock does not need it.
+### 4.3 Prompt builder for real generators ✅
+File: `step_format.py`. Turns a node's text into the chat messages a real (instruct) model receives. Pure functions: no model needed to test them.
 
-### 4.5 Problems and test cases ✅ done (Two Sum)
-- `problem.py`: `TestCase(args, expected)` and `Problem(name, statement, function_name, signature, public_tests, hidden_tests)`.
-- Test format: function call with **positional** arguments → expected output (LeetCode style). Positional, so that a correct solution with different parameter names still passes. Only JSON-friendly values (numbers, strings, lists, booleans, `None`).
-- `Problem.to_prompt()`: statement + `Examples:` built from the **public tests only** + signature. Hidden tests never reach the model.
-- Ambiguous outputs are removed in the statement (e.g. "Return the two indices in increasing order") so that tests can compare with `==`.
-- `problems.py`: `TWO_SUM` with 2 public and 5 hidden tests (each hidden test targets a typical bug); the tests are checked against a reference solution.
-- Later: one adapter per dataset converts its format into `Problem`/`TestCase`, with an automatic public/hidden split; `TestCase` may need an extra kind (raw `assert`) for some datasets.
-- Then public datasets (from Hugging Face, `datasets` library): MBPP, HumanEval, then LeetCodeDataset / LiveCodeBench.
+**Constants**
+- `SYSTEM_PROMPT`: the format rules — solve one step at a time; each reasoning step on a single line starting with `Step N:`, describing the plan in words, without code; when the plan is complete, `Code:` followed by a ```` ```python ```` block with the complete function; nothing else (no explanations, usage examples or prints). Kept short: small models follow examples better than long instructions.
+- `FEW_SHOT_PROBLEM`: a solved example problem ("return the largest element of a non-empty list of integers") written in **exactly** the shape of `Problem.to_prompt()` (`Problem:` statement, `Examples:`, `f(args) -> result` lines, signature). The second example uses negative numbers, so that a solution starting from 0 would be wrong. It is deliberately unrelated to the evaluation problems, so the model cannot copy a solution.
+- `FEW_SHOT_SOLUTION`: its solution in the canonical format: two plan-level steps, then `Code:` and a clean function (no comments, prints or usage examples), nothing after the closing fence. The model imitates everything in it. Its code passes `extract_code` and returns the expected results on both examples.
 
-### 4.6 `CodeExecutor`: safe execution ✅ done
-Two programs talking through stdin/stdout in JSON:
-- `runner.py` (separate process): reads `{code, function_name, tests}`, `exec`s the code in its own namespace, calls the function with positional args on each test, normalizes the result through JSON (tuple → list), compares with `==`. Model prints are redirected away from stdout; `Exception` and `SystemExit` are caught. Writes `{"results": [{status, actual, error}]}`.
-- `executor.py`: `CodeExecutor(timeout=5.0).run(code, function_name, tests) -> ExecutionResult`. Launches the runner with `sys.executable` in a temporary working directory. Timeout → every test `"timeout"`; runner dying without valid JSON (e.g. `os._exit`) → every test `"error"` with exit code and stderr tail.
-- `TestResult(test, status, actual, error)`, status ∈ `passed | failed | error | timeout`; `ExecutionResult.num_passed`, `.all_passed` (`False` when there are no tests).
-- One process for all the tests of a run (cheaper than one per test).
-- Security note: a separate process protects against hangs and crashes, not against malicious file access; a real sandbox (container) is a possible later improvement.
-- `main.py` grades every leaf of the demo tree on the public tests, picks a passing one and measures it on the hidden tests.
+**`split_prompt(full_text) -> (problem, steps)`**: splits the text at the **first line that starts with `Step` or `Code:`** (case-sensitive: tree text is always canonical). Everything before is the problem, everything from that line on is the steps, both re-joined with `"\n"`. No such line (root node) → `(full_text, "")`. This relies on no line of a problem statement starting with `Step`; `problems.py` checks it for `TWO_SUM`.
 
-### 4.7 `Evaluator`: node evaluation 🔲
+**`build_messages(full_text) -> list[dict]`**: messages with `role` and `content`:
+
+| # | role | content |
+|---|---|---|
+| 1 | `system` | `SYSTEM_PROMPT` |
+| 2 | `user` | `FEW_SHOT_PROBLEM` |
+| 3 | `assistant` | `FEW_SHOT_SOLUTION` |
+| 4 | `user` | the problem part of `full_text` |
+| 5 | `assistant` | **only if there are steps**: the steps + `"\n"` (prefill) |
+
+Messages 2–3 are the few-shot example: a fake earlier turn in which the model "sees itself" answer in the right format. Message 5 is the **prefill**: an assistant message that is already started and that the model continues, so it develops *this* branch instead of starting over. It always ends with `"\n"`: without it the model continues the last step's sentence instead of starting a new step.
+
+The three kinds of node:
+
+| Node | Messages | Last message | Model continues with |
+|---|---|---|---|
+| Root | 4 | `user`: the problem | `Step 1: ...` (or directly `Code:`) |
+| Intermediate | 5 | `assistant`: `"Step 1: ...\n...Step k: ...\n"` | `Step k+1: ...` or `Code:` |
+| Forced code | 5 | `assistant`: `"...Step k: ...\nCode:\n"` | the ```` ```python ```` block |
+
+`build_messages` does not choose how to apply the chat template; the generator decides from the role of the last message (§4.6).
+
+### 4.4 `SearchConfig` ✅
+File: `config.py`. Dataclass with defaults.
+- `branching: list[int] = [4, 2, 2]`: how many candidates to request at each depth (index = depth of the node being expanded). Wide at the first level (strategy choice), narrow afterwards. Its length is the maximum number of reasoning steps.
+- `code_branching: int = 2`: how many candidates to request when code is forced.
+- `max_steps` (property) = `len(branching)`.
+- Validation in `__post_init__`: `branching` not empty, every value ≥ 1, `code_branching` ≥ 1, otherwise `ValueError`. Each instance gets its own list (`default_factory`).
+
+Beam width, number of rollouts and temperature will be added here.
+
+### 4.5 `StepGenerator` interface and `MockGenerator` ✅
+File: `step_generator.py`.
+
+**Interface** (abstract class): `generate_steps(prompt: str, n: int) -> list[str]`.
+- `prompt` is a node's `get_full_text()`, possibly ending with `"\nCode:"` when code is forced.
+- It returns `n` raw strings (fewer distinct ones are fine: `expand` deduplicates). They may be malformed or contain extra text: the parser handles that.
+- When the prompt ends with `Code:`, each output is the **continuation only**: the code block **without** the label (`expand` adds it back).
+- Every generator must produce diverse alternatives and, ideally, stop after one step.
+
+**`MockGenerator(step_candidates, code_candidates, seed)`**: deterministic fake model for tests and demos.
+- `step_candidates`: one list of candidate strings per level; `code_candidates`: code blocks without the label; `seed`: its own `random.Random`, so the same calls give the same outputs.
+- Prompt ending with `Code:` (case-insensitive) → `n` random code candidates, unlabelled.
+- Otherwise level = number of prompt lines starting with `Step` (case-insensitive) → `n` random choices (with repetition) from that level's candidates.
+- Candidates exhausted (level ≥ number of levels) → `n` code candidates **with** the `Code:\n` label, as a model choosing to write code would do.
+
+### 4.6 `HFGenerator`: real model ✅
+File: `hf_generator.py`. Implements `StepGenerator` with a Hugging Face causal language model.
+
+**Constructor** `HFGenerator(model_name, temperature, top_p, max_new_tokens, seed)`:
+
+| Parameter | Default | Role |
+|---|---|---|
+| `model_name` | `"Qwen/Qwen2.5-Coder-0.5B-Instruct"` | Model to load (~494M parameters, ~1 GB) |
+| `temperature` | `0.8` | Sampling temperature: < 1 safer choices, > 1 more variety |
+| `top_p` | `0.95` | Nucleus sampling: keep the most likely tokens covering 95% of the probability |
+| `max_new_tokens` | `256` | Hard limit per answer; large enough for a complete function |
+| `seed` | `0` | Passed to `transformers.set_seed` once |
+
+- Device: `"mps"` (Apple GPU) if available, otherwise `"cpu"`.
+- Tokenizer: `AutoTokenizer.from_pretrained(model_name)`. Model: `AutoModelForCausalLM.from_pretrained(model_name, dtype=torch.float32)`, moved to the device, put in `eval()` mode. Both are loaded **once**, in the constructor. The first run downloads the weights into `~/.cache/huggingface`; afterwards they load from the cache (`HF_HUB_OFFLINE=1` avoids any network call).
+- `set_seed(seed)` is called once in the constructor, not per call: a whole run is reproducible, and successive calls still get different random numbers.
+
+**`generate_steps(prompt, n)`**, in five phases:
+1. **Messages**: `build_messages(prompt)` (§4.3).
+2. **Chat template** (`apply_chat_template(..., tokenize=False)`), chosen from the last message:
+   - last message `user` (root) → `add_generation_prompt=True`: opens an empty assistant turn (`...<|im_start|>assistant\n`);
+   - last message `assistant` (prefill) → `continue_final_message=True`: leaves the prefilled message **open**, without the closing `<|im_end|>`, so the model continues it. (`add_generation_prompt` would close the prefill and the model would start a new answer from scratch.)
+3. **Tokenization**: `tokenizer(text, return_tensors="pt")` on the device; `prompt_length` = number of prompt tokens (`input_ids.shape[1]`).
+4. **Generation** under `torch.no_grad()`: `model.generate(**inputs, do_sample=True, temperature, top_p, max_new_tokens, num_return_sequences=n, stopping_criteria=StoppingCriteriaList([StopAtNextStep(tokenizer, prompt_length)]))`. All `n` answers are sampled in one call from the same prompt. Output shape: `[n, prompt_length + generated tokens]`; sequences that stop early are padded.
+5. **Decoding**: for each row keep the tokens after `prompt_length` and `decode(..., skip_special_tokens=True)` (drops `<|im_end|>` and padding). Returns the list of `n` strings.
+
+**`StopAtNextStep(tokenizer, prompt_length)`**: a `transformers.StoppingCriteria`. `generate` calls it after every generated token with the current `input_ids` (`[n, current length]`) and the scores; it returns a boolean tensor with one value per sequence (`True` = stop that sequence; the others continue).
+- It decodes **only the new tokens** (`input_ids[:, prompt_length:]`, with `batch_decode`) and stops a sequence as soon as its new text contains `"\n" + STEP_PREFIX` or `"\n" + CODE_PREFIX`, i.e. the model has finished its step and started another one. The cut-off text (e.g. `"Step 2: ...\nStep"`) is removed later by `parse_step`.
+- Only new tokens are checked because the prompt itself ends with `"\n"` (prefill or `assistant\n`): `transformers`' built-in `stop_strings` match across the prompt boundary and would stop every answer right after its first word `Step`.
+- It works on decoded text rather than token ids because newlines are often merged with other characters into one token (e.g. `".\n"`).
+- A new instance is created at every call, because `prompt_length` differs for every node.
+- `scores` and `**kwargs` are unused but required by the `StoppingCriteria` call signature.
+
+**Observed behavior** (Two Sum, 3 answers per call, M-series Mac):
+- With few-shot + prefill the model follows the format: correct step numbers, steps consistent with the branch, `Code:` + block. No answer was discarded in the checks.
+- With the stopping criterion each call takes ~1.5–1.7 s instead of ~4–4.5 s without it.
+- In the forced-code case the model writes only the block and stops by itself (end of turn); the criterion never triggers there.
+- The root produces genuinely different first steps (different strategies), which is what the tree needs.
+- A step may span several lines when the following lines don't start with `Step`; generation then stops at the next `Step`/`Code:` and the parser keeps the multi-line step.
+- Well-formatted code can still be wrong (e.g. `nums.index(complement)` reusing the same element): format is checked by the parser, correctness only by the tests.
+
+### 4.7 `expand`: growing the tree ✅
+File: `tree_search.py`. `expand(node, generator, config) -> list[ReasoningNode]`.
+1. Terminal node → `[]`, and the generator is not called.
+2. `force_code = node.depth >= config.max_steps`; `k = config.code_branching` if forced, else `config.branching[node.depth]`.
+3. `prompt = node.get_full_text()`, plus `"\n" + CODE_PREFIX` if forced.
+4. `raw_steps = generator.generate_steps(prompt, k)`.
+5. For each raw output: if forced, prepend `CODE_PREFIX + "\n"`; `parse_step(raw, force_code)`; skip `None`; key = `format_step(parsed, node.depth + 1)`. A dict keyed on the canonical text removes duplicates while keeping the first occurrence's order.
+6. One child per distinct text (`add_child(text)`); code children get `is_terminal = True` and `code = parsed.code`.
+7. Returns the new children (possibly fewer than `k`, or none if every output was invalid).
+
+`expand` does not know which generator it is using: mock and real model are interchangeable.
+
+### 4.8 Problems and test cases ✅
+File: `problem.py`.
+- `TestCase(args: list, expected)`: a call with **positional** arguments and the expected return value (LeetCode style). Positional, so that a correct solution with different parameter names still passes. Only JSON-friendly values (numbers, strings, lists, booleans, `None`).
+- `Problem(name, statement, function_name, signature, public_tests, hidden_tests)`.
+- `Problem.to_prompt()`: the statement, then `Examples:`, then one line `function_name(args) -> expected` per **public** test (values shown with `repr`), then the signature. Hidden tests never reach the model.
+
+File: `problems.py`.
+- `TWO_SUM`: statement starting with `Problem:`; ambiguity removed so tests can compare with `==` ("Return the two indices in increasing order"); signature `def two_sum(nums: list[int], target: int) -> list[int]:`.
+- 2 public tests; 5 hidden tests, each targeting a typical bug: duplicates (`[3, 3]`), negative numbers, zeros with target 0, pair at the end, first element not in the pair.
+- Self-check: a reference solution passes all 7 tests; no hidden test appears in the prompt; no prompt line starts with `Step`.
+
+Later: one adapter per dataset converts its format into `Problem`/`TestCase` with an automatic public/hidden split (`TestCase` may need a raw-`assert` kind for some datasets); datasets from Hugging Face (`datasets` library): MBPP, HumanEval, then LeetCodeDataset / LiveCodeBench.
+
+### 4.9 `CodeExecutor`: safe execution ✅
+Two programs talking through stdin/stdout in JSON.
+
+**`runner.py`** (child process):
+- Input: `{"code", "function_name", "tests": [{"args", "expected"}]}`. Empty input → `{"results": []}`.
+- `exec`s the code in its own namespace, with stdout redirected so model prints can't corrupt the JSON output. Any `Exception` or `SystemExit` during setup, or no callable named `function_name` → every test is `error` with that message.
+- For each test: calls `func(*args)` with stdout redirected; an exception → `error` (`"TypeName: message"`). The result is normalized through JSON (`json.loads(json.dumps(result))`, so a tuple equals a list); not serializable → `failed`. Then `passed` if it equals `expected`, otherwise `failed`.
+- Output: `{"results": [{"status", "actual", "error"}]}`, one per test, in order.
+
+**`executor.py`**:
+- `CodeExecutor(timeout=5.0).run(code, function_name, tests) -> ExecutionResult`. Launches `runner.py` with the same interpreter (`sys.executable`), in a fresh temporary working directory (files created by the code don't land in the project), all tests in **one** process.
+- Timeout → every test `timeout`. Runner output that isn't valid JSON with `results` (e.g. `os._exit`, out of memory) → every test `error` with the exit code and the last 300 characters of stderr. Wrong number of results → every test `error`.
+- `TestResult(test, status, actual, error)`, status ∈ `passed | failed | error | timeout`.
+- `ExecutionResult.num_passed`; `.all_passed` (`False` when there are no tests).
+- Security: a separate process protects against hangs and crashes, not against malicious file or network access; a real sandbox (container) is a possible later improvement.
+
+### 4.10 Demo ✅
+File: `main.py`. End-to-end run with `MockGenerator` on Two Sum:
+- Mock candidates include a valid hash-map solution, a valid brute-force solution, a **valid-but-wrong** solution (returns values instead of indices), a syntax error, an empty step and an early code step at the root. Seed 6 is chosen so these cases actually occur.
+- Grows the full tree level by level (BFS over a frontier) until no node is expandable; prints it.
+- Grades every code leaf on the **public tests** only, picks the first passing one, and measures it on the **hidden tests**.
+- Asserts: every leaf is terminal; no node deeper than `max_steps + 1`; reasoning steps numbered by depth; no syntax error accepted; the executor rejects exactly the wrong-but-valid code; the chosen code passes all hidden tests.
+
+### 4.11 Self-checks
+Each module has an `if __name__ == "__main__":` block that checks it (run with `python <file>.py`):
+
+| File | What it checks |
+|---|---|
+| `step_format.py` | 17 parser cases (labels, numbering, truncation, code validation, forced code); few-shot example has the prompt's shape and valid code; `build_messages` on root / intermediate / forced-code nodes (message count, last message with trailing `\n`, problem in the 4th message) |
+| `config.py` | Defaults, custom values, independent lists, invalid values rejected |
+| `step_generator.py` | Mock levels, multi-line problem, exhausted candidates, forced code, reproducibility |
+| `tree_search.py` | Root expansion (cleaning, dedup, terminal), forced code at max depth, terminal not expanded, all-invalid outputs |
+| `problems.py` | Tests against a reference solution, no hidden-test leak, no `Step` line in the prompt |
+| `executor.py` | Correct, wrong, partially right, exception, wrong name, infinite loop, `os._exit`, no tests, demo codes |
+| `hf_generator.py` | Loads the model and runs `generate_steps` on root / after Step 1 / forced code, printing raw and parsed outputs. Slow and stochastic: a manual check, not an automatic test |
+
+Planned: move the automatic checks into a `tests/` folder run by `pytest`; keep `hf_generator.py`'s check as a manual script (or a test marked slow).
+
+### 4.12 `Evaluator`: node evaluation 🔲
 Abstract interface that assigns a score in [0, 1] to a node.
 - `RolloutEvaluator` (phase 1): completes the solution N times from the node, runs the **public tests**, score = success rate.
 - `LearnedPRM` (phase 2): the trained PRM (see §5).
 - Switching between the two = changing one line.
 
-### 4.8 Search 🔲
-- **Beam search**: like the frontier-based BFS already used in the `expand` test, but at each level only the `B` best-scoring nodes are kept.
+### 4.13 Search 🔲
+- **Beam search**: like the frontier-based BFS in `main.py`, but at each level only the `B` best-scoring nodes are kept.
 - Output: the code of the best terminal node according to the public tests and the score.
 - Possible extension: MCTS.
 
-### 4.9 Repair step 🔲 (added value)
+### 4.14 Repair step 🔲 (added value)
 When a terminal node's code fails the public tests, the outcome (input, expected, actual, error) is added to the context and the generator produces a new step analysing the error + fixed code, as a **child of the failed node**.
+
+### 4.15 `VLLMGenerator` 🔲 (scalability)
+Same model and same prompt builder as `HFGenerator`, served by vLLM on a cloud GPU (prefix caching for the tree's shared prefixes).
 
 ---
 
@@ -194,18 +367,20 @@ When a terminal node's code fails the public tests, the outcome (input, expected
 3. The PRM train/validation split is **by problem**.
 4. Systems are compared **at equal compute**.
 5. Fixed seeds wherever possible, for reproducibility.
+6. The few-shot example must not come from, or resemble, an evaluation problem.
 
 ---
 
 ## 8. Tech stack
 
-- **Python** 3.10+ (current venv: 3.12)
-- **`torch`, `transformers`**: local models
-- **`datasets`**: loading problem datasets
-- **`peft`**: LoRA for PRM training
+- **Python** 3.12 (venv in `.venv`)
+- **`torch`** 2.14, **`transformers`** 5.19: local models. In this version `from_pretrained` takes `dtype=` (not the older `torch_dtype=`).
+- **`datasets`**: loading problem datasets (not used yet)
+- **`peft`**: LoRA for PRM training (not used yet)
 - **vLLM**: fast generation on Linux/cloud GPUs (not available on the Mac)
 - **`subprocess`** (standard library): safe code execution
-- **Models**: `Qwen2.5-Coder-0.5B/1.5B-Instruct` (generator and PRM base)
+- **Models**: `Qwen2.5-Coder-0.5B-Instruct` for development; `1.5B-Instruct` for experiments; also the PRM base.
+- Running offline once the model is cached: `HF_HUB_OFFLINE=1 python <file>.py`.
 
 ---
 
@@ -214,9 +389,11 @@ When a terminal node's code fails the public tests, the outcome (input, expected
 | # | Step | Status |
 |---|---|---|
 | 0 | `ReasoningNode`, `StepGenerator` + `MockGenerator`, `expand` | ✅ done |
-| 1 | Step format (§4.4): `step_format.py` + `SearchConfig`, adapt mock and `expand`, Two Sum demo; `Problem`/`TestCase` with Two Sum tests (§4.5) | ✅ done |
+| 1 | Step format and parser, `SearchConfig`, `Problem`/`TestCase` with Two Sum, demo | ✅ done |
 | 2 | `CodeExecutor` (separate process + timeout) | ✅ done |
-| 3 | `HFGenerator` with a small coder model | 🔲 next |
+| 3 | `HFGenerator`: prompt builder (few-shot + prefill), `generate_steps`, `StopAtNextStep` | ✅ done |
+| 3a | Move self-checks into `tests/` with `pytest` | 🔲 next |
+| 3b | First real tree on Two Sum: `expand` with `HFGenerator` + `CodeExecutor` (like `main.py`) | 🔲 |
 | 4 | `Evaluator` + `RolloutEvaluator` | 🔲 |
 | 5 | Beam search | 🔲 |
 | 6 | Baselines (single, Best-of-N) and comparison on MBPP / HumanEval | 🔲 |
@@ -230,7 +407,8 @@ Steps 1–6 make up the complete project; 7–8 are the added value.
 
 ## 10. Open decisions
 
-- Exact prompt wording and few-shot example for real generators (the step format itself is decided, §4.4).
+- Prompt tuning: the current system prompt and few-shot example work on Two Sum; to be re-checked on a dataset (rate of valid outputs, multi-line steps). Stopping at the first `\n` instead of the next label is an option if multi-line steps become a problem.
+- Sampling defaults (`temperature`, `top_p`) and `max_new_tokens` for longer solutions.
 - Default values for the per-level branching and maximum depth (to be tuned by experiments; starting point `[4, 2, 2]`).
 - Number of rollouts per node (cost vs noise); all-or-nothing vs partial credit on tests.
 - Number of public tests per problem.
