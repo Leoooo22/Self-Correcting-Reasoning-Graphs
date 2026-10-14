@@ -63,6 +63,8 @@ Problems don't have to come from LeetCode. What matters is that they follow the 
 | `runner.py` | Child process that executes model code on the tests | standard library only |
 | `executor.py` | `CodeExecutor`, `TestResult`, `ExecutionResult` | `problem`, `runner.py` (as a file) |
 | `main.py` | End-to-end demo with the mock generator | everything except `hf_generator` |
+| `tests/` | `pytest` tests, one file per module (§4.11) | the module under test |
+| `pytest.ini` | `pytest` configuration | — |
 
 `HFGenerator` lives in its own file so that the mock, the parser and their checks never need `torch` installed or loaded.
 
@@ -274,7 +276,7 @@ File: `problem.py`.
 File: `problems.py`.
 - `TWO_SUM`: statement starting with `Problem:`; ambiguity removed so tests can compare with `==` ("Return the two indices in increasing order"); signature `def two_sum(nums: list[int], target: int) -> list[int]:`.
 - 2 public tests; 5 hidden tests, each targeting a typical bug: duplicates (`[3, 3]`), negative numbers, zeros with target 0, pair at the end, first element not in the pair.
-- Self-check: a reference solution passes all 7 tests; no hidden test appears in the prompt; no prompt line starts with `Step`.
+- Checked by `tests/test_problems.py`: a reference solution passes all 7 tests; no hidden test appears in the prompt; no prompt line starts with `Step`.
 
 Later: one adapter per dataset converts its format into `Problem`/`TestCase` with an automatic public/hidden split (`TestCase` may need a raw-`assert` kind for some datasets); datasets from Hugging Face (`datasets` library): MBPP, HumanEval, then LeetCodeDataset / LiveCodeBench.
 
@@ -301,20 +303,27 @@ File: `main.py`. End-to-end run with `MockGenerator` on Two Sum:
 - Grades every code leaf on the **public tests** only, picks the first passing one, and measures it on the **hidden tests**.
 - Asserts: every leaf is terminal; no node deeper than `max_steps + 1`; reasoning steps numbered by depth; no syntax error accepted; the executor rejects exactly the wrong-but-valid code; the chosen code passes all hidden tests.
 
-### 4.11 Self-checks
-Each module has an `if __name__ == "__main__":` block that checks it (run with `python <file>.py`):
+### 4.11 Tests ✅
+Automatic tests live in `tests/` and run with `pytest` from the project root (`HF_HUB_OFFLINE=1 pytest` to avoid network calls). `pytest.ini` sets `pythonpath = .` (so tests can import the project modules) and `testpaths = tests`. 59 tests, about 5 seconds. Modules contain only code: no test code in `if __name__ == "__main__":` blocks.
 
-| File | What it checks |
+| Test file | What it checks |
 |---|---|
-| `step_format.py` | 17 parser cases (labels, numbering, truncation, code validation, forced code); few-shot example has the prompt's shape and valid code; `build_messages` on root / intermediate / forced-code nodes (message count, last message with trailing `\n`, problem in the 4th message) |
-| `config.py` | Defaults, custom values, independent lists, invalid values rejected |
-| `step_generator.py` | Mock levels, multi-line problem, exhausted candidates, forced code, reproducibility |
-| `tree_search.py` | Root expansion (cleaning, dedup, terminal), forced code at max depth, terminal not expanded, all-invalid outputs |
-| `problems.py` | Tests against a reference solution, no hidden-test leak, no `Step` line in the prompt |
-| `executor.py` | Correct, wrong, partially right, exception, wrong name, infinite loop, `os._exit`, no tests, demo codes |
-| `hf_generator.py` | Loads the model and runs `generate_steps` on root / after Step 1 / forced code, printing raw and parsed outputs. Slow and stochastic: a manual check, not an automatic test |
+| `test_config.py` | Defaults; custom values; each config gets its own list; empty branching, a 0 in branching and `code_branching = 0` raise `ValueError` |
+| `test_step_format.py` | 17 parser cases, one test each (labels, numbering, truncation, multi-line steps, code validation, forced code); few-shot problem has the shape of `to_prompt()`; few-shot code is valid and correct on its examples; `split_prompt` and `build_messages` on root / intermediate / forced-code nodes (message count and roles, last message with trailing `\n`, problem in the 4th message) |
+| `test_step_generator.py` | Mock levels with a multi-line problem mentioning "steps", exhausted candidates → labelled code, forced code → unlabelled code, same seed → same outputs |
+| `test_tree_search.py` | With a spy generator: root expansion (cleaning, dedup, terminal code node), forced code at max depth (prompt ends with `Code:`, `code_branching` used), terminal node not expanded (generator not called), all-invalid outputs → no children |
+| `test_problems.py` | Test counts; every Two Sum test matches a reference solution; no hidden test appears in the prompt; no prompt line starts with `Step` |
+| `test_executor.py` | Correct, values instead of indices, partially right, exception, wrong function name, infinite loop (timeout within `timeout + 1` s), `os._exit`, no tests, all 7 Two Sum tests, verdicts on the demo's codes |
+| `test_demo.py` | Runs `main.main()`, whose own assertions check the whole demo |
+| `test_hf_generator.py` | `StopAtNextStep` on a hand-built `input_ids` table (tokenizer only, no model): stops exactly the sequences whose new text started `Step`/`Code:`; a `"\nStep"` spanning the prompt boundary does not stop |
 
-Planned: move the automatic checks into a `tests/` folder run by `pytest`; keep `hf_generator.py`'s check as a manual script (or a test marked slow).
+Conventions:
+- One behavior per test function, named after what it checks.
+- Tables of cases use `@pytest.mark.parametrize` with `pytest.param(..., id="...")`, so each case is reported separately by name.
+- Expected errors use `with pytest.raises(...)`; shared setup uses fixtures (`executor` in `test_executor.py`, a module-scoped `tokenizer` in `test_hf_generator.py`).
+- Test modules don't import `TestCase` / `TestResult` by name, otherwise pytest tries to collect them as test classes.
+
+**Manual check**: `hf_generator.py` keeps its `__main__` block. It loads the model and runs `generate_steps` on root / after Step 1 / forced code, printing raw and parsed outputs. Slow and stochastic, so it is not part of the automatic tests.
 
 ### 4.12 `Evaluator`: node evaluation 🔲
 Abstract interface that assigns a score in [0, 1] to a node.
@@ -379,6 +388,7 @@ Same model and same prompt builder as `HFGenerator`, served by vLLM on a cloud G
 - **`peft`**: LoRA for PRM training (not used yet)
 - **vLLM**: fast generation on Linux/cloud GPUs (not available on the Mac)
 - **`subprocess`** (standard library): safe code execution
+- **`pytest`** 9: automatic tests
 - **Models**: `Qwen2.5-Coder-0.5B-Instruct` for development; `1.5B-Instruct` for experiments; also the PRM base.
 - Running offline once the model is cached: `HF_HUB_OFFLINE=1 python <file>.py`.
 
@@ -392,8 +402,8 @@ Same model and same prompt builder as `HFGenerator`, served by vLLM on a cloud G
 | 1 | Step format and parser, `SearchConfig`, `Problem`/`TestCase` with Two Sum, demo | ✅ done |
 | 2 | `CodeExecutor` (separate process + timeout) | ✅ done |
 | 3 | `HFGenerator`: prompt builder (few-shot + prefill), `generate_steps`, `StopAtNextStep` | ✅ done |
-| 3a | Move self-checks into `tests/` with `pytest` | 🔲 next |
-| 3b | First real tree on Two Sum: `expand` with `HFGenerator` + `CodeExecutor` (like `main.py`) | 🔲 |
+| 3a | Move self-checks into `tests/` with `pytest`, add a `StopAtNextStep` test | ✅ done |
+| 3b | First real tree on Two Sum: `expand` with `HFGenerator` + `CodeExecutor` (like `main.py`) | 🔲 next |
 | 4 | `Evaluator` + `RolloutEvaluator` | 🔲 |
 | 5 | Beam search | 🔲 |
 | 6 | Baselines (single, Best-of-N) and comparison on MBPP / HumanEval | 🔲 |
