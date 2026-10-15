@@ -1,10 +1,11 @@
 from reasoning_graphs.reasoning_node import ReasoningNode
 from reasoning_graphs.generators.base import MockGenerator
 from reasoning_graphs.config import SearchConfig
-from reasoning_graphs.search.expand import expand
 from reasoning_graphs.problems.two_sum import TWO_SUM
 from reasoning_graphs.execution.executor import CodeExecutor
 from reasoning_graphs.step_format import extract_code
+from reasoning_graphs.search.full_tree import grow_full_tree
+from reasoning_graphs.execution.grading import pick_solution, grade_on_public
 
 HASH_MAP_CODE = """```python
 def two_sum(nums, target):
@@ -60,22 +61,26 @@ STEP_CANDIDATES = [
 CODE_CANDIDATES = [HASH_MAP_CODE, BRUTE_FORCE_CODE, WRONG_CODE, BROKEN_CODE]
 
 
+def print_public_results(leaves, public_results, problem):
+    """One line per code leaf (verdict + first step of its branch), plus the tests it failed."""
+    for node in leaves:
+        result = public_results[node.id]
+        first_step = node.get_path()[1]
+        strategy = "(code written directly)" if first_step is node else first_step.step_text[:45]
+        verdict = "PASS" if result.all_passed else "FAIL"
+        print(f"node {node.id:>2}  {verdict}  {result.num_passed}/{len(result.results)} public  | {strategy}")
+        for r in result.results:
+            if r.status != "passed":
+                print(f"           {r.status}: {problem.function_name}{tuple(r.test.args)} -> {r.actual!r}, expected {r.test.expected!r}")
+
+
 def main():
     config = SearchConfig()
     # Seed chosen so that the root sees an empty step and an early code step
     generator = MockGenerator(STEP_CANDIDATES, CODE_CANDIDATES, seed=6)
     root = ReasoningNode(TWO_SUM.to_prompt())
 
-    # Expand level by level until no node is left to expand.
-    # This always terminates: at max depth expand forces code, and code nodes are terminal.
-    all_nodes = [root]
-    frontier = [root]
-    while frontier:
-        next_frontier = []
-        for node in frontier:
-            next_frontier.extend(expand(node, generator, config))
-        all_nodes.extend(next_frontier)
-        frontier = next_frontier
+    all_nodes = grow_full_tree(root, generator, config)
 
     root.print_tree()
 
@@ -84,20 +89,11 @@ def main():
 
     # Grade every code leaf on the PUBLIC tests only, as the search will do
     executor = CodeExecutor()
-    public_results = {}
-    for node in terminals:
-        result = executor.run(node.code, TWO_SUM.function_name, TWO_SUM.public_tests)
-        public_results[node.id] = result
-        first_step = node.get_path()[1]
-        strategy = "(code written directly)" if first_step is node else first_step.step_text[:45]
-        verdict = "PASS" if result.all_passed else "FAIL"
-        print(f"node {node.id:>2}  {verdict}  {result.num_passed}/{len(result.results)} public  | {strategy}")
-        for r in result.results:
-            if r.status != "passed":
-                print(f"           {r.status}: {TWO_SUM.function_name}{tuple(r.test.args)} -> {r.actual!r}, expected {r.test.expected!r}")
+    public_results = grade_on_public(terminals, TWO_SUM, executor)
+    print_public_results(terminals, public_results, TWO_SUM)
 
     # Pick a solution using the public tests, then measure it on the HIDDEN tests
-    chosen = next((node for node in terminals if public_results[node.id].all_passed), None)
+    chosen = pick_solution(terminals, public_results)
     if chosen is None:
         print("\nNo code passes the public tests")
     else:

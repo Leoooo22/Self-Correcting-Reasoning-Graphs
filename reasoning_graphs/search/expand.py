@@ -8,11 +8,8 @@ def expand(node: ReasoningNode, generator: StepGenerator, config: SearchConfig) 
     if node.is_terminal:
         return []
 
-    force_code = node.depth >= config.max_steps
-    if force_code:
-        k = config.code_branching
-    else:
-        k = config.branching[node.depth]
+    force_code = config.forces_code(node.depth)
+    k = config.num_candidates(node.depth)
 
     prompt = node.get_full_text()
     if force_code:
