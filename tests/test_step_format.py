@@ -1,7 +1,7 @@
 import pytest
 
-from problems import TWO_SUM
-from step_format import (
+from reasoning_graphs.problems.two_sum import TWO_SUM
+from reasoning_graphs.step_format import (
     FEW_SHOT_PROBLEM,
     FEW_SHOT_SOLUTION,
     build_messages,

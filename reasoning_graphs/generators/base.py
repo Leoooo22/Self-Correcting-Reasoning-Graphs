@@ -1,7 +1,7 @@
 import random
 from abc import ABC, abstractmethod
 
-from step_format import STEP_PREFIX, CODE_PREFIX
+from reasoning_graphs.step_format import STEP_PREFIX, CODE_PREFIX
 
 
 class StepGenerator(ABC):

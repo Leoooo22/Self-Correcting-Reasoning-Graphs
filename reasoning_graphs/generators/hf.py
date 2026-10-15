@@ -1,8 +1,8 @@
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM, set_seed, StoppingCriteria, StoppingCriteriaList
 
-from step_generator import StepGenerator
-from step_format import build_messages, STEP_PREFIX, CODE_PREFIX
+from reasoning_graphs.generators.base import StepGenerator
+from reasoning_graphs.step_format import build_messages, STEP_PREFIX, CODE_PREFIX
 
 
 class StopAtNextStep(StoppingCriteria):
@@ -73,8 +73,8 @@ class HFGenerator(StepGenerator):
 
 
 if __name__ == "__main__":
-    from problems import TWO_SUM
-    from step_format import CODE_PREFIX, parse_step
+    from reasoning_graphs.problems.two_sum import TWO_SUM
+    from reasoning_graphs.step_format import CODE_PREFIX, parse_step
 
     generator = HFGenerator()
     print("device:", generator.device)

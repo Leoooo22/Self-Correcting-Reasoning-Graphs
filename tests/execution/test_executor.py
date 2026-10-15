@@ -3,9 +3,9 @@ import time
 import pytest
 
 import main as demo
-from executor import CodeExecutor
-from problems import TWO_SUM
-from step_format import extract_code
+from reasoning_graphs.execution.executor import CodeExecutor
+from reasoning_graphs.problems.two_sum import TWO_SUM
+from reasoning_graphs.step_format import extract_code
 
 PUBLIC = TWO_SUM.public_tests
 ALL_TESTS = TWO_SUM.public_tests + TWO_SUM.hidden_tests

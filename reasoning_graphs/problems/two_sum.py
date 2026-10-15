@@ -1,4 +1,4 @@
-from problem import TestCase, Problem
+from reasoning_graphs.problems.problem import TestCase, Problem
 
 TWO_SUM = Problem(
     name="two_sum",

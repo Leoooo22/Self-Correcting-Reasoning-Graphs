@@ -50,28 +50,54 @@ Problems don't have to come from LeetCode. What matters is that they follow the 
 
 ### 3.2 Files
 
-| File | Contents | Depends on |
+The project code is the `reasoning_graphs` package, split into subpackages by role. Every folder has an (empty) `__init__.py`. The demo, the tests and the configuration stay at the project root.
+
+```
+Self-Correcting-Reasoning-Graphs/
+├── reasoning_graphs/
+│   ├── reasoning_node.py
+│   ├── config.py
+│   ├── step_format.py
+│   ├── generators/    base.py, hf.py
+│   ├── search/        expand.py
+│   ├── execution/     executor.py, runner.py
+│   └── problems/      problem.py, two_sum.py
+├── tests/             same layout as the package (§4.11)
+├── main.py
+├── pytest.ini
+├── requirements.txt
+└── SPECIFICATIONS.md
+```
+
+| Module (under `reasoning_graphs/`) | Contents | Depends on |
 |---|---|---|
 | `reasoning_node.py` | `ReasoningNode`: the tree | — |
-| `step_format.py` | Step labels, parser, formatter, prompt builder (system prompt, few-shot example, `split_prompt`, `build_messages`) | — |
 | `config.py` | `SearchConfig`: branching per level, maximum depth | — |
-| `step_generator.py` | `StepGenerator` interface, `MockGenerator` | `step_format` |
-| `hf_generator.py` | `HFGenerator` (real model via `transformers`), `StopAtNextStep` | `step_generator`, `step_format`, `torch`, `transformers` |
-| `tree_search.py` | `expand` | `reasoning_node`, `step_generator`, `config`, `step_format` |
-| `problem.py` | `TestCase`, `Problem` | — |
-| `problems.py` | Problem instances (`TWO_SUM`) | `problem` |
-| `runner.py` | Child process that executes model code on the tests | standard library only |
-| `executor.py` | `CodeExecutor`, `TestResult`, `ExecutionResult` | `problem`, `runner.py` (as a file) |
-| `main.py` | End-to-end demo with the mock generator | everything except `hf_generator` |
-| `tests/` | `pytest` tests, one file per module (§4.11) | the module under test |
-| `pytest.ini` | `pytest` configuration | — |
+| `step_format.py` | Step labels, parser, formatter, prompt builder (system prompt, few-shot example, `split_prompt`, `build_messages`) | — |
+| `generators/base.py` | `StepGenerator` interface, `MockGenerator` | `step_format` |
+| `generators/hf.py` | `HFGenerator` (real model via `transformers`), `StopAtNextStep` | `generators.base`, `step_format`, `torch`, `transformers` |
+| `search/expand.py` | `expand` | `reasoning_node`, `generators.base`, `config`, `step_format` |
+| `execution/runner.py` | Child process that executes model code on the tests | standard library only |
+| `execution/executor.py` | `CodeExecutor`, `TestResult`, `ExecutionResult` | `problems.problem`, `runner.py` (as a file in the same folder) |
+| `problems/problem.py` | `TestCase`, `Problem` | — |
+| `problems/two_sum.py` | `TWO_SUM` | `problems.problem` |
 
-`HFGenerator` lives in its own file so that the mock, the parser and their checks never need `torch` installed or loaded.
+| At the project root | Contents |
+|---|---|
+| `main.py` | End-to-end demo with the mock generator (uses everything except `generators.hf`) |
+| `tests/` | `pytest` tests (§4.11) |
+| `pytest.ini` | `pytest` configuration |
+
+**Imports** are absolute from the package root: `from reasoning_graphs.step_format import parse_step`, `from reasoning_graphs.generators.base import StepGenerator`. They work when Python runs from the project root: `python main.py`, `pytest`, or a module run with `-m` (`python -m reasoning_graphs.generators.hf`). Running a package file by its path (`python reasoning_graphs/generators/hf.py`) fails with `ModuleNotFoundError`, because Python then only sees that file's folder.
+
+`generators/hf.py` is separate from `generators/base.py` so that the mock, the parser and their tests never need `torch` loaded.
+
+New modules go in the subpackage matching their role: evaluators and beam search in `search/`, dataset adapters in `problems/`, `VLLMGenerator` in `generators/`.
 
 ### 3.3 One expansion, end to end
 
 ```
-expand(node, generator, config)                                  tree_search.py
+expand(node, generator, config)                                  search/expand.py
   │ force_code = node.depth >= config.max_steps
   │ k          = config.code_branching if force_code else config.branching[node.depth]
   │ prompt     = node.get_full_text()  (+ "\nCode:" if force_code)
@@ -92,7 +118,7 @@ one child per distinct canonical text; code children are terminal and store .cod
 ## 4. Components (current behavior)
 
 ### 4.1 `ReasoningNode`: the tree ✅
-File: `reasoning_node.py`. Pure data structure, with no model or search logic.
+File: `reasoning_graphs/reasoning_node.py`. Pure data structure, with no model or search logic.
 
 **Attributes**
 
@@ -117,7 +143,7 @@ File: `reasoning_node.py`. Pure data structure, with no model or search logic.
 - `__repr__`: `(id=…, depth=…, score=…, terminal=…, text="…")`, with the text on one line (`\n` shown as `⏎`) and cut at 40 characters.
 
 ### 4.2 Step format and parser ✅
-File: `step_format.py`. Guiding principle: **never trust the model's output** — parse and validate it, discard what is malformed. Everything about the format lives in this one module, shared by `expand`, the mock, `HFGenerator` and the checks: changing a label means changing one constant.
+File: `reasoning_graphs/step_format.py`. Guiding principle: **never trust the model's output** — parse and validate it, discard what is malformed. Everything about the format lives in this one module, shared by `expand`, the mock, `HFGenerator` and the checks: changing a label means changing one constant.
 
 **Labels**: `STEP_PREFIX = "Step"`, `CODE_PREFIX = "Code:"`.
 - Reasoning step: `Step N: <natural-language text>`.
@@ -159,14 +185,14 @@ def two_sum(nums, target):
 **Maximum depth.** Below `max_steps`, the prompt ends with no label and the generator chooses between another `Step` and `Code:`. At `max_steps`, `expand` appends `Code:` to the prompt: the model can only write code and any other output is discarded. Every branch therefore terminates, which rollouts require.
 
 ### 4.3 Prompt builder for real generators ✅
-File: `step_format.py`. Turns a node's text into the chat messages a real (instruct) model receives. Pure functions: no model needed to test them.
+File: `reasoning_graphs/step_format.py`. Turns a node's text into the chat messages a real (instruct) model receives. Pure functions: no model needed to test them.
 
 **Constants**
 - `SYSTEM_PROMPT`: the format rules — solve one step at a time; each reasoning step on a single line starting with `Step N:`, describing the plan in words, without code; when the plan is complete, `Code:` followed by a ```` ```python ```` block with the complete function; nothing else (no explanations, usage examples or prints). Kept short: small models follow examples better than long instructions.
 - `FEW_SHOT_PROBLEM`: a solved example problem ("return the largest element of a non-empty list of integers") written in **exactly** the shape of `Problem.to_prompt()` (`Problem:` statement, `Examples:`, `f(args) -> result` lines, signature). The second example uses negative numbers, so that a solution starting from 0 would be wrong. It is deliberately unrelated to the evaluation problems, so the model cannot copy a solution.
 - `FEW_SHOT_SOLUTION`: its solution in the canonical format: two plan-level steps, then `Code:` and a clean function (no comments, prints or usage examples), nothing after the closing fence. The model imitates everything in it. Its code passes `extract_code` and returns the expected results on both examples.
 
-**`split_prompt(full_text) -> (problem, steps)`**: splits the text at the **first line that starts with `Step` or `Code:`** (case-sensitive: tree text is always canonical). Everything before is the problem, everything from that line on is the steps, both re-joined with `"\n"`. No such line (root node) → `(full_text, "")`. This relies on no line of a problem statement starting with `Step`; `problems.py` checks it for `TWO_SUM`.
+**`split_prompt(full_text) -> (problem, steps)`**: splits the text at the **first line that starts with `Step` or `Code:`** (case-sensitive: tree text is always canonical). Everything before is the problem, everything from that line on is the steps, both re-joined with `"\n"`. No such line (root node) → `(full_text, "")`. This relies on no line of a problem statement starting with `Step`; `tests/problems/test_two_sum.py` checks it for `TWO_SUM`.
 
 **`build_messages(full_text) -> list[dict]`**: messages with `role` and `content`:
 
@@ -191,7 +217,7 @@ The three kinds of node:
 `build_messages` does not choose how to apply the chat template; the generator decides from the role of the last message (§4.6).
 
 ### 4.4 `SearchConfig` ✅
-File: `config.py`. Dataclass with defaults.
+File: `reasoning_graphs/config.py`. Dataclass with defaults.
 - `branching: list[int] = [4, 2, 2]`: how many candidates to request at each depth (index = depth of the node being expanded). Wide at the first level (strategy choice), narrow afterwards. Its length is the maximum number of reasoning steps.
 - `code_branching: int = 2`: how many candidates to request when code is forced.
 - `max_steps` (property) = `len(branching)`.
@@ -200,7 +226,7 @@ File: `config.py`. Dataclass with defaults.
 Beam width, number of rollouts and temperature will be added here.
 
 ### 4.5 `StepGenerator` interface and `MockGenerator` ✅
-File: `step_generator.py`.
+File: `reasoning_graphs/generators/base.py`.
 
 **Interface** (abstract class): `generate_steps(prompt: str, n: int) -> list[str]`.
 - `prompt` is a node's `get_full_text()`, possibly ending with `"\nCode:"` when code is forced.
@@ -215,7 +241,7 @@ File: `step_generator.py`.
 - Candidates exhausted (level ≥ number of levels) → `n` code candidates **with** the `Code:\n` label, as a model choosing to write code would do.
 
 ### 4.6 `HFGenerator`: real model ✅
-File: `hf_generator.py`. Implements `StepGenerator` with a Hugging Face causal language model.
+File: `reasoning_graphs/generators/hf.py`. Implements `StepGenerator` with a Hugging Face causal language model.
 
 **Constructor** `HFGenerator(model_name, temperature, top_p, max_new_tokens, seed)`:
 
@@ -256,7 +282,7 @@ File: `hf_generator.py`. Implements `StepGenerator` with a Hugging Face causal l
 - Well-formatted code can still be wrong (e.g. `nums.index(complement)` reusing the same element): format is checked by the parser, correctness only by the tests.
 
 ### 4.7 `expand`: growing the tree ✅
-File: `tree_search.py`. `expand(node, generator, config) -> list[ReasoningNode]`.
+File: `reasoning_graphs/search/expand.py`. `expand(node, generator, config) -> list[ReasoningNode]`.
 1. Terminal node → `[]`, and the generator is not called.
 2. `force_code = node.depth >= config.max_steps`; `k = config.code_branching` if forced, else `config.branching[node.depth]`.
 3. `prompt = node.get_full_text()`, plus `"\n" + CODE_PREFIX` if forced.
@@ -268,28 +294,28 @@ File: `tree_search.py`. `expand(node, generator, config) -> list[ReasoningNode]`
 `expand` does not know which generator it is using: mock and real model are interchangeable.
 
 ### 4.8 Problems and test cases ✅
-File: `problem.py`.
+File: `reasoning_graphs/problems/problem.py`.
 - `TestCase(args: list, expected)`: a call with **positional** arguments and the expected return value (LeetCode style). Positional, so that a correct solution with different parameter names still passes. Only JSON-friendly values (numbers, strings, lists, booleans, `None`).
 - `Problem(name, statement, function_name, signature, public_tests, hidden_tests)`.
 - `Problem.to_prompt()`: the statement, then `Examples:`, then one line `function_name(args) -> expected` per **public** test (values shown with `repr`), then the signature. Hidden tests never reach the model.
 
-File: `problems.py`.
+File: `reasoning_graphs/problems/two_sum.py`.
 - `TWO_SUM`: statement starting with `Problem:`; ambiguity removed so tests can compare with `==` ("Return the two indices in increasing order"); signature `def two_sum(nums: list[int], target: int) -> list[int]:`.
 - 2 public tests; 5 hidden tests, each targeting a typical bug: duplicates (`[3, 3]`), negative numbers, zeros with target 0, pair at the end, first element not in the pair.
-- Checked by `tests/test_problems.py`: a reference solution passes all 7 tests; no hidden test appears in the prompt; no prompt line starts with `Step`.
+- Checked by `tests/problems/test_two_sum.py`: a reference solution passes all 7 tests; no hidden test appears in the prompt; no prompt line starts with `Step`.
 
 Later: one adapter per dataset converts its format into `Problem`/`TestCase` with an automatic public/hidden split (`TestCase` may need a raw-`assert` kind for some datasets); datasets from Hugging Face (`datasets` library): MBPP, HumanEval, then LeetCodeDataset / LiveCodeBench.
 
 ### 4.9 `CodeExecutor`: safe execution ✅
 Two programs talking through stdin/stdout in JSON.
 
-**`runner.py`** (child process):
+**`reasoning_graphs/execution/runner.py`** (child process):
 - Input: `{"code", "function_name", "tests": [{"args", "expected"}]}`. Empty input → `{"results": []}`.
 - `exec`s the code in its own namespace, with stdout redirected so model prints can't corrupt the JSON output. Any `Exception` or `SystemExit` during setup, or no callable named `function_name` → every test is `error` with that message.
 - For each test: calls `func(*args)` with stdout redirected; an exception → `error` (`"TypeName: message"`). The result is normalized through JSON (`json.loads(json.dumps(result))`, so a tuple equals a list); not serializable → `failed`. Then `passed` if it equals `expected`, otherwise `failed`.
 - Output: `{"results": [{"status", "actual", "error"}]}`, one per test, in order.
 
-**`executor.py`**:
+**`reasoning_graphs/execution/executor.py`**:
 - `CodeExecutor(timeout=5.0).run(code, function_name, tests) -> ExecutionResult`. Launches `runner.py` with the same interpreter (`sys.executable`), in a fresh temporary working directory (files created by the code don't land in the project), all tests in **one** process.
 - Timeout → every test `timeout`. Runner output that isn't valid JSON with `results` (e.g. `os._exit`, out of memory) → every test `error` with the exit code and the last 300 characters of stderr. Wrong number of results → every test `error`.
 - `TestResult(test, status, actual, error)`, status ∈ `passed | failed | error | timeout`.
@@ -304,26 +330,26 @@ File: `main.py`. End-to-end run with `MockGenerator` on Two Sum:
 - Asserts: every leaf is terminal; no node deeper than `max_steps + 1`; reasoning steps numbered by depth; no syntax error accepted; the executor rejects exactly the wrong-but-valid code; the chosen code passes all hidden tests.
 
 ### 4.11 Tests ✅
-Automatic tests live in `tests/` and run with `pytest` from the project root (`HF_HUB_OFFLINE=1 pytest` to avoid network calls). `pytest.ini` sets `pythonpath = .` (so tests can import the project modules) and `testpaths = tests`. 59 tests, about 5 seconds. Modules contain only code: no test code in `if __name__ == "__main__":` blocks.
+Automatic tests live in `tests/` and run with `pytest` from the project root (`HF_HUB_OFFLINE=1 pytest` to avoid network calls). `pytest.ini` sets `pythonpath = .` (so tests can import the `reasoning_graphs` package and `main`) and `testpaths = tests`. `tests/` mirrors the package layout: tests of `reasoning_graphs/<sub>/<module>.py` live in `tests/<sub>/`, tests of the top-level modules and of the demo in `tests/` itself; test file names are unique across folders. 59 tests, about 5 seconds. Modules contain only code: no test code in `if __name__ == "__main__":` blocks.
 
-| Test file | What it checks |
+| Test file (under `tests/`) | What it checks |
 |---|---|
 | `test_config.py` | Defaults; custom values; each config gets its own list; empty branching, a 0 in branching and `code_branching = 0` raise `ValueError` |
 | `test_step_format.py` | 17 parser cases, one test each (labels, numbering, truncation, multi-line steps, code validation, forced code); few-shot problem has the shape of `to_prompt()`; few-shot code is valid and correct on its examples; `split_prompt` and `build_messages` on root / intermediate / forced-code nodes (message count and roles, last message with trailing `\n`, problem in the 4th message) |
-| `test_step_generator.py` | Mock levels with a multi-line problem mentioning "steps", exhausted candidates → labelled code, forced code → unlabelled code, same seed → same outputs |
-| `test_tree_search.py` | With a spy generator: root expansion (cleaning, dedup, terminal code node), forced code at max depth (prompt ends with `Code:`, `code_branching` used), terminal node not expanded (generator not called), all-invalid outputs → no children |
-| `test_problems.py` | Test counts; every Two Sum test matches a reference solution; no hidden test appears in the prompt; no prompt line starts with `Step` |
-| `test_executor.py` | Correct, values instead of indices, partially right, exception, wrong function name, infinite loop (timeout within `timeout + 1` s), `os._exit`, no tests, all 7 Two Sum tests, verdicts on the demo's codes |
+| `generators/test_mock.py` | Mock levels with a multi-line problem mentioning "steps", exhausted candidates → labelled code, forced code → unlabelled code, same seed → same outputs |
+| `search/test_expand.py` | With a spy generator: root expansion (cleaning, dedup, terminal code node), forced code at max depth (prompt ends with `Code:`, `code_branching` used), terminal node not expanded (generator not called), all-invalid outputs → no children |
+| `problems/test_two_sum.py` | Test counts; every Two Sum test matches a reference solution; no hidden test appears in the prompt; no prompt line starts with `Step` |
+| `execution/test_executor.py` | Correct, values instead of indices, partially right, exception, wrong function name, infinite loop (timeout within `timeout + 1` s), `os._exit`, no tests, all 7 Two Sum tests, verdicts on the demo's codes |
 | `test_demo.py` | Runs `main.main()`, whose own assertions check the whole demo |
-| `test_hf_generator.py` | `StopAtNextStep` on a hand-built `input_ids` table (tokenizer only, no model): stops exactly the sequences whose new text started `Step`/`Code:`; a `"\nStep"` spanning the prompt boundary does not stop |
+| `generators/test_hf.py` | `StopAtNextStep` on a hand-built `input_ids` table (tokenizer only, no model): stops exactly the sequences whose new text started `Step`/`Code:`; a `"\nStep"` spanning the prompt boundary does not stop |
 
 Conventions:
 - One behavior per test function, named after what it checks.
 - Tables of cases use `@pytest.mark.parametrize` with `pytest.param(..., id="...")`, so each case is reported separately by name.
-- Expected errors use `with pytest.raises(...)`; shared setup uses fixtures (`executor` in `test_executor.py`, a module-scoped `tokenizer` in `test_hf_generator.py`).
+- Expected errors use `with pytest.raises(...)`; shared setup uses fixtures (`executor` in `execution/test_executor.py`, a module-scoped `tokenizer` in `generators/test_hf.py`).
 - Test modules don't import `TestCase` / `TestResult` by name, otherwise pytest tries to collect them as test classes.
 
-**Manual check**: `hf_generator.py` keeps its `__main__` block. It loads the model and runs `generate_steps` on root / after Step 1 / forced code, printing raw and parsed outputs. Slow and stochastic, so it is not part of the automatic tests.
+**Manual check**: `generators/hf.py` keeps its `__main__` block (`HF_HUB_OFFLINE=1 python -m reasoning_graphs.generators.hf`). It loads the model and runs `generate_steps` on root / after Step 1 / forced code, printing raw and parsed outputs. Slow and stochastic, so it is not part of the automatic tests.
 
 ### 4.12 `Evaluator`: node evaluation 🔲
 Abstract interface that assigns a score in [0, 1] to a node.
@@ -390,7 +416,7 @@ Same model and same prompt builder as `HFGenerator`, served by vLLM on a cloud G
 - **`subprocess`** (standard library): safe code execution
 - **`pytest`** 9: automatic tests
 - **Models**: `Qwen2.5-Coder-0.5B-Instruct` for development; `1.5B-Instruct` for experiments; also the PRM base.
-- Running offline once the model is cached: `HF_HUB_OFFLINE=1 python <file>.py`.
+- Running offline once the model is cached: `HF_HUB_OFFLINE=1 pytest`, `HF_HUB_OFFLINE=1 python -m reasoning_graphs.generators.hf`.
 
 ---
 
@@ -403,6 +429,7 @@ Same model and same prompt builder as `HFGenerator`, served by vLLM on a cloud G
 | 2 | `CodeExecutor` (separate process + timeout) | ✅ done |
 | 3 | `HFGenerator`: prompt builder (few-shot + prefill), `generate_steps`, `StopAtNextStep` | ✅ done |
 | 3a | Move self-checks into `tests/` with `pytest`, add a `StopAtNextStep` test | ✅ done |
+| 3a+ | Reorganize the modules into the `reasoning_graphs` package | ✅ done |
 | 3b | First real tree on Two Sum: `expand` with `HFGenerator` + `CodeExecutor` (like `main.py`) | 🔲 next |
 | 4 | `Evaluator` + `RolloutEvaluator` | 🔲 |
 | 5 | Beam search | 🔲 |

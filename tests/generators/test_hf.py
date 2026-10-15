@@ -2,7 +2,7 @@ import pytest
 import torch
 from transformers import AutoTokenizer
 
-from hf_generator import StopAtNextStep
+from reasoning_graphs.generators.hf import StopAtNextStep
 
 # Only the tokenizer is loaded (fast, from the local cache): the model is not needed here
 MODEL_NAME = "Qwen/Qwen2.5-Coder-0.5B-Instruct"

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from problem import TestCase
+from reasoning_graphs.problems.problem import TestCase
 
 
 @dataclass

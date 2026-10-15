@@ -1,5 +1,5 @@
-from step_format import CODE_PREFIX, parse_step
-from step_generator import MockGenerator
+from reasoning_graphs.step_format import CODE_PREFIX, parse_step
+from reasoning_graphs.generators.base import MockGenerator
 
 STEP_CANDIDATES = [
     ["Step 1: Use a hash map.", "Step 1: Try every pair."],

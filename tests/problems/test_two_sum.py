@@ -1,4 +1,4 @@
-from problems import TWO_SUM
+from reasoning_graphs.problems.two_sum import TWO_SUM
 
 
 def reference_two_sum(nums, target):

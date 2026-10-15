@@ -1,6 +1,6 @@
 import pytest
 
-from config import SearchConfig
+from reasoning_graphs.config import SearchConfig
 
 
 def test_defaults():
