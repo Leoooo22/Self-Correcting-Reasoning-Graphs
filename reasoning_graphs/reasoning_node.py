@@ -26,6 +26,14 @@ class ReasoningNode:
             curr = curr.parent
         return path[::-1]
 
+    def detached_copy(self):
+        """Same text and depth as this node, on a new chain of nodes not linked to this tree (used by rollouts)."""
+        path = self.get_path()
+        copy = ReasoningNode(path[0].step_text)
+        for node in path[1:]:
+            copy = copy.add_child(node.step_text)
+        return copy
+
     def get_full_text(self):
         return "\n".join(node.step_text for node in self.get_path())
     
