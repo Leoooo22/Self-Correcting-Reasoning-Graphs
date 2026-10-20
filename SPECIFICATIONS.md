@@ -65,6 +65,7 @@ Self-Correcting-Reasoning-Graphs/
 ├── tests/             same layout as the package (§4.11)
 ├── main.py
 ├── hf_tree.py
+├── hf_scores.py
 ├── pytest.ini
 ├── requirements.txt
 └── SPECIFICATIONS.md
@@ -91,6 +92,7 @@ Self-Correcting-Reasoning-Graphs/
 |---|---|
 | `main.py` | End-to-end demo with the mock generator (uses everything except `generators.hf`); also defines `print_public_results` |
 | `hf_tree.py` | Full tree on Two Sum with the real model, with measurements (§4.10b) |
+| `hf_scores.py` | Rollout scores of the first-level branches of Two Sum with the real model (§4.12) |
 | `tests/` | `pytest` tests (§4.11) |
 | `pytest.ini` | `pytest` configuration |
 
@@ -426,6 +428,23 @@ File: `reasoning_graphs/search/evaluator.py`.
 - The real tree is never modified (rollouts work on detached copies). `node.score` is not set: the caller decides where to store the score.
 - Cost: up to `n × (max_steps − depth + 1)` generator calls and up to `n` executions per node.
 
+**Real-model check** — `hf_scores.py` (run: `HF_HUB_OFFLINE=1 python hf_scores.py`, about 3 minutes): expands the root once (same seed and first call as `hf_tree.py`, so the same four first steps), then scores each first-level node with `RolloutEvaluator(n=8)` and stores it in `node.score`.
+
+Measured (2026-10-20, Qwen2.5-Coder-0.5B, seed 0), next to the share of that branch's leaves passing the public tests in the full tree of §4.10b:
+
+| Step 1 | Rollout score (n = 8) | Time | Leaves passing in the full tree |
+|---|---|---|---|
+| Start with the index 0 | 0.500 | 33 s | 7 / 7 |
+| Find the complement of the target number | 0.750 | 31 s | 4 / 7 |
+| Iterate through the list and check the complement | 0.125 | 39 s | 0 / 5 |
+| Initialize two pointers `left` and `right` | 0.000 | 62 s | 0 / 5 |
+
+Total 166 s for 32 rollouts (~5 s per rollout). Observations:
+- The two weak branches are clearly separated from the two good ones, in the same order as in the full tree; the two-pointer branch, which cannot return original indices after sorting, scores 0.
+- The two good branches swap places compared with the full tree. The two measures differ: a rollout samples single paths with repetitions, while the tree's leaves are deduplicated branches; and with n = 8 the typical error is about ±0.18, so 0.5 vs 0.75 is within noise. The complement branch is the hash-map idea, i.e. the algorithm that is correct on the hidden tests too, while many "index 0" leaves only checked adjacent pairs.
+- The two-pointer branch took about twice as long: its code is more often wrong in ways that hang (loops that never end), and each hanging program costs the executor's full timeout (5 s). A shorter timeout would make rollouts cheaper.
+- Scoring 4 nodes cost ~2.8 times the whole tree of §4.10b (166 s vs 60 s), as expected from the theory: evaluation, not expansion, dominates the cost.
+
 **`LearnedPRM`** (phase 2) 🔲: the trained PRM (see §5), with the same interface.
 
 ### 4.13 Search 🔲
@@ -502,7 +521,7 @@ Same model and same prompt builder as `HFGenerator`, served by vLLM on a cloud G
 | 3a | Move self-checks into `tests/` with `pytest`, add a `StopAtNextStep` test | ✅ done |
 | 3a+ | Reorganize the modules into the `reasoning_graphs` package | ✅ done |
 | 3b | First real tree on Two Sum: `grow_full_tree`, `grading.py`, `config.num_candidates`, `hf_tree.py` with measurements (§4.10b) | ✅ done |
-| 4 | `Evaluator` + `RolloutEvaluator`, `rollout`, `ReasoningNode.detached_copy` | ✅ done (real-model check of first-level scores still to run) |
+| 4 | `Evaluator` + `RolloutEvaluator`, `rollout`, `ReasoningNode.detached_copy`, real-model check `hf_scores.py` | ✅ done |
 | 5 | Beam search | 🔲 next |
 | 6 | Baselines (single, Best-of-N) and comparison on MBPP / HumanEval | 🔲 |
 | 7 | Repair step from errors | 🔲 added value |
