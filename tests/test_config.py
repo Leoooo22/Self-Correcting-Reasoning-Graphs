@@ -7,13 +7,15 @@ def test_defaults():
     config = SearchConfig()
     assert config.branching == [4, 2, 2]
     assert config.code_branching == 2
+    assert config.beam_width == 2
     assert config.max_steps == 3
 
 
 def test_custom_values():
-    config = SearchConfig(branching=[6, 3], code_branching=1)
+    config = SearchConfig(branching=[6, 3], code_branching=1, beam_width=5)
     assert config.max_steps == 2
     assert config.code_branching == 1
+    assert config.beam_width == 5
 
 
 def test_each_config_has_its_own_list():
@@ -46,6 +48,7 @@ def test_code_branching_is_used_only_at_max_depth():
     pytest.param({"branching": []}, id="empty branching"),
     pytest.param({"branching": [4, 0]}, id="zero in branching"),
     pytest.param({"code_branching": 0}, id="zero code branching"),
+    pytest.param({"beam_width": 0}, id="zero beam width"),
 ])
 def test_invalid_values_are_rejected(kwargs):
     with pytest.raises(ValueError):

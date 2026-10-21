@@ -59,7 +59,7 @@ Self-Correcting-Reasoning-Graphs/
 │   ├── config.py
 │   ├── step_format.py
 │   ├── generators/    base.py, hf.py
-│   ├── search/        expand.py, full_tree.py, rollout.py, evaluator.py
+│   ├── search/        expand.py, full_tree.py, rollout.py, evaluator.py, beam.py
 │   ├── execution/     executor.py, runner.py, grading.py
 │   └── problems/      problem.py, two_sum.py
 ├── tests/             same layout as the package (§4.11)
@@ -82,6 +82,7 @@ Self-Correcting-Reasoning-Graphs/
 | `search/full_tree.py` | `grow_full_tree`: expands every node | `search.expand` |
 | `search/rollout.py` | `rollout`: one branch from a node down to code | `search.expand`, `config`, `reasoning_node` |
 | `search/evaluator.py` | `Evaluator` interface, `RolloutEvaluator` | `search.rollout`, `execution.executor`, `problems.problem` |
+| `search/beam.py` | `beam_search` | `search.expand`, `search.evaluator`, `config` |
 | `execution/runner.py` | Child process that executes model code on the tests | standard library only |
 | `execution/executor.py` | `CodeExecutor`, `TestResult`, `ExecutionResult` | `problems.problem`, `runner.py` (as a file in the same folder) |
 | `execution/grading.py` | `grade_on_public`, `pick_solution`: grade code leaves and choose the solution | `execution.executor`, `problems.problem`, `reasoning_node` |
@@ -229,13 +230,14 @@ The three kinds of node:
 File: `reasoning_graphs/config.py`. Dataclass with defaults.
 - `branching: list[int] = [4, 2, 2]`: how many candidates to request at each depth (index = depth of the node being expanded). Wide at the first level (strategy choice), narrow afterwards. Its length is the maximum number of reasoning steps.
 - `code_branching: int = 2`: how many candidates to request when code is forced.
+- `beam_width: int = 2`: how many non-terminal nodes the beam search keeps at each level (§4.13). Ignored by `grow_full_tree` and by rollouts.
 - `max_steps` (property) = `len(branching)`.
 - `forces_code(depth) -> bool`: `depth >= max_steps`, i.e. a node at this depth may only be followed by code.
 - `num_candidates(depth) -> int`: how many outputs to request when expanding a node at this depth: `code_branching` if `forces_code(depth)`, else `branching[depth]`. With the defaults: 4 at the root, then 2, 2, and 2 (code) at depth 3.
 - These two methods are the single place where the rule lives: `expand` uses them to decide what to ask the generator, and analysis code uses them to know, after the fact, how many outputs a node had requested (requested − `len(node.children)` = outputs lost to parsing or deduplication).
-- Validation in `__post_init__`: `branching` not empty, every value ≥ 1, `code_branching` ≥ 1, otherwise `ValueError`. Each instance gets its own list (`default_factory`).
+- Validation in `__post_init__`: `branching` not empty, every value ≥ 1, `code_branching` ≥ 1, `beam_width` ≥ 1, otherwise `ValueError`. Each instance gets its own list (`default_factory`).
 
-Beam width, number of rollouts and temperature will be added here.
+The number of rollouts is a parameter of the `RolloutEvaluator`, the sampling temperature of the generator: they are not search settings.
 
 ### 4.5 `StepGenerator` interface and `MockGenerator` ✅
 File: `reasoning_graphs/generators/base.py`.
@@ -380,7 +382,7 @@ Observations:
 - Branch quality differs visibly: every leaf under "Start with the index 0" passes the public tests, every leaf under the two-pointer strategy fails (Two Sum asks for original indices, which sorting loses). This difference between branches is what a rollout score is meant to capture.
 
 ### 4.11 Tests ✅
-Automatic tests live in `tests/` and run with `pytest` from the project root (`HF_HUB_OFFLINE=1 pytest` to avoid network calls). `pytest.ini` sets `pythonpath = .` (so tests can import the `reasoning_graphs` package and `main`) and `testpaths = tests`. `tests/` mirrors the package layout: tests of `reasoning_graphs/<sub>/<module>.py` live in `tests/<sub>/`, tests of the top-level modules and of the demo in `tests/` itself; test file names are unique across folders. 88 tests, about 5 seconds. Modules contain only code: no test code in `if __name__ == "__main__":` blocks.
+Automatic tests live in `tests/` and run with `pytest` from the project root (`HF_HUB_OFFLINE=1 pytest` to avoid network calls). `pytest.ini` sets `pythonpath = .` (so tests can import the `reasoning_graphs` package and `main`) and `testpaths = tests`. `tests/` mirrors the package layout: tests of `reasoning_graphs/<sub>/<module>.py` live in `tests/<sub>/`, tests of the top-level modules and of the demo in `tests/` itself; test file names are unique across folders. 95 tests, about 5 seconds. Modules contain only code: no test code in `if __name__ == "__main__":` blocks.
 
 | Test file (under `tests/`) | What it checks |
 |---|---|
@@ -390,6 +392,7 @@ Automatic tests live in `tests/` and run with `pytest` from the project root (`H
 | `generators/test_mock.py` | Mock levels with a multi-line problem mentioning "steps", exhausted candidates → labelled code, forced code → unlabelled code, same seed → same outputs |
 | `search/test_rollout.py` | With a scripted spy generator: reaches code with one output per call and code forced at the search's max depth; early code ends the rollout; an invalid output → `None`; a code node is returned as is without calling the generator; the real tree is unchanged |
 | `search/test_evaluator.py` | With a scripted generator and a spy executor: score is the fraction of passing rollouts (1, 0, 0.5, and 0.75 with a stuck rollout); only public tests are run; stuck rollouts are not executed; a code node is scored by its own tests with one execution and no generator call; the real tree is unchanged; `n` < 1 rejected |
+| `search/test_beam.py` | With a scripted generator and a fixed-score evaluator: keeps exactly the best `beam_width` nodes at each level (only they are expanded; pruned nodes keep their score and get no children); every node except the root is scored once; code children don't take beam slots; stops when every child is code; ties keep creation order; a beam wider than the candidates keeps them all |
 | `search/test_expand.py` | With a spy generator: root expansion (cleaning, dedup, terminal code node), forced code at max depth (prompt ends with `Code:`, `code_branching` used), terminal node not expanded (generator not called), all-invalid outputs → no children |
 | `problems/test_two_sum.py` | Test counts; every Two Sum test matches a reference solution; no hidden test appears in the prompt; no prompt line starts with `Step` |
 | `execution/test_executor.py` | Correct, values instead of indices, partially right, exception, wrong function name, infinite loop (timeout within `timeout + 1` s), `os._exit`, no tests, all 7 Two Sum tests, verdicts on the demo's codes |
@@ -398,7 +401,7 @@ Automatic tests live in `tests/` and run with `pytest` from the project root (`H
 | `generators/test_hf.py` | `StopAtNextStep` on a hand-built `input_ids` table (tokenizer only, no model): stops exactly the sequences whose new text started `Step`/`Code:`; a `"\nStep"` spanning the prompt boundary does not stop |
 
 Conventions:
-- Test doubles shared by several files live in `tests/helpers.py` (`ScriptedGenerator`: answers each call with the next output of a script and records the calls; `SpyExecutor`: a real `CodeExecutor` that records the tests it runs), imported with `from tests.helpers import ...`.
+- Test doubles shared by several files live in `tests/helpers.py` (`ScriptedGenerator`: answers each call with the next entry of a script — one output or a list of outputs — and records the calls; `SpyExecutor`: a real `CodeExecutor` that records the tests it runs; `FixedScoreEvaluator`: scores from a table keyed by `step_text`, with a default, and records what it scored), imported with `from tests.helpers import ...`.
 - One behavior per test function, named after what it checks.
 - Tables of cases use `@pytest.mark.parametrize` with `pytest.param(..., id="...")`, so each case is reported separately by name.
 - Expected errors use `with pytest.raises(...)`; shared setup uses fixtures (`executor` in `execution/test_executor.py`, a module-scoped `tokenizer` in `generators/test_hf.py`).
@@ -447,10 +450,22 @@ Total 166 s for 32 rollouts (~5 s per rollout). Observations:
 
 **`LearnedPRM`** (phase 2) 🔲: the trained PRM (see §5), with the same interface.
 
-### 4.13 Search 🔲
-- **Beam search**: like `grow_full_tree`, but at each level only the `B` best-scoring nodes are kept.
-- Output: the code of the best terminal node according to the public tests and the score.
-- Possible extension: MCTS.
+### 4.13 Beam search ✅
+File: `reasoning_graphs/search/beam.py`. `beam_search(root, generator, config, evaluator) -> list[ReasoningNode]`.
+
+Same level-by-level loop as `grow_full_tree` (§4.7b), but the frontier is restricted to the best nodes. Each round has three phases:
+1. **Expand** every frontier node with `expand`; all new children are added to the returned list.
+2. **Score** every new child with `evaluator.score` and store it in `node.score`. Code children are candidate solutions: they are scored (for a `RolloutEvaluator`, by their own public tests) but never enter the frontier, so they never take a beam slot from a reasoning step.
+3. **Select**: the non-terminal children sorted by score, highest first, cut to `config.beam_width`, become the next frontier. The sort is stable, so ties keep creation order (children of better-ranked parents first, then generation order).
+
+- The root is not scored (it is the only node of its level and is always expanded): `root.score` stays `None`. Every other node is scored exactly once.
+- Stops when a round leaves no non-terminal child (all code, or nothing valid). Always terminates, like `grow_full_tree`.
+- Pruned nodes stay in the tree with their score and no children: the returned list records what was discarded. Since nothing grows under them, the code nodes of the returned list are exactly the candidate solutions.
+- Returns all the nodes, root first, like `grow_full_tree`, so the two are interchangeable in scripts. Choosing the final solution is a separate step.
+
+**Cost** (beam width B, `n` rollouts, no early code and no duplicates): every level expands at most B nodes (1 call each) and scores at most B × branching children, each with up to `n × (max_steps − depth + 1)` calls. With the defaults (`[4, 2, 2]`, code branching 2, B = 2) and n = 4: 7 expansions + 96 rollout calls ≈ 103 calls, examining 4 code leaves, against 29 calls and 32 leaves for the unscored full tree. On a tree this small exhaustive expansion is cheaper; the beam's cost grows linearly with depth while the full tree grows exponentially, and the scores buy selection quality rather than savings. With a learned PRM (one forward pass per score) most of the cost disappears. Systems must therefore be compared at equal compute (§6).
+
+Possible extension: MCTS (reuses rollout nodes instead of discarding them).
 
 ### 4.14 Repair step 🔲 (added value)
 When a terminal node's code fails the public tests, the outcome (input, expected, actual, error) is added to the context and the generator produces a new step analysing the error + fixed code, as a **child of the failed node**.
@@ -522,7 +537,7 @@ Same model and same prompt builder as `HFGenerator`, served by vLLM on a cloud G
 | 3a+ | Reorganize the modules into the `reasoning_graphs` package | ✅ done |
 | 3b | First real tree on Two Sum: `grow_full_tree`, `grading.py`, `config.num_candidates`, `hf_tree.py` with measurements (§4.10b) | ✅ done |
 | 4 | `Evaluator` + `RolloutEvaluator`, `rollout`, `ReasoningNode.detached_copy`, real-model check `hf_scores.py` | ✅ done |
-| 5 | Beam search | 🔲 next |
+| 5 | Beam search (`search/beam.py`, `beam_width` in `SearchConfig`) | 🔲 in progress: score-based selection of the solution and real-model run still to do |
 | 6 | Baselines (single, Best-of-N) and comparison on MBPP / HumanEval | 🔲 |
 | 7 | Repair step from errors | 🔲 added value |
 | 8 | Data collection + PRM training (`LearnedPRM`) | 🔲 advanced |

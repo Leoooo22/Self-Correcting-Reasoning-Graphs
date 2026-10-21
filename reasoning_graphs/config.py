@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 class SearchConfig:
     branching: list[int] = field(default_factory=lambda: [4, 2, 2])
     code_branching: int = 2
+    beam_width: int = 2
 
     def __post_init__(self):
         if not self.branching:
@@ -14,6 +15,8 @@ class SearchConfig:
                 raise ValueError(f"branching values must be >= 1, got {self.branching}")
         if self.code_branching < 1:
             raise ValueError(f"code_branching must be >= 1, got {self.code_branching}")
+        if self.beam_width < 1:
+            raise ValueError(f"beam_width must be >= 1, got {self.beam_width}")
 
     @property
     def max_steps(self) -> int:
