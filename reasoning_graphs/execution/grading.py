@@ -14,3 +14,14 @@ def grade_on_public(leaves: list[ReasoningNode], problem: Problem, executor: Cod
 def pick_solution(leaves: list[ReasoningNode], public_results: dict[int, ExecutionResult]) -> ReasoningNode | None:
     """The first leaf that passes every public test, or None."""
     return next((node for node in leaves if public_results[node.id].all_passed), None)
+
+
+def branch_value(leaf: ReasoningNode) -> float:
+    """Score of the last reasoning step before the code; -1 (below any real score) if it has none, e.g. the root."""
+    return leaf.parent.score if leaf.parent.score is not None else -1.0
+
+
+def pick_by_branch(leaves: list[ReasoningNode], public_results: dict[int, ExecutionResult]) -> ReasoningNode | None:
+    """Among the leaves passing every public test, the one whose branch scored best (ties: first one), or None."""
+    valid_leaves = [node for node in leaves if public_results[node.id].all_passed]
+    return max(valid_leaves, key=branch_value, default=None)

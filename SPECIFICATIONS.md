@@ -85,7 +85,7 @@ Self-Correcting-Reasoning-Graphs/
 | `search/beam.py` | `beam_search` | `search.expand`, `search.evaluator`, `config` |
 | `execution/runner.py` | Child process that executes model code on the tests | standard library only |
 | `execution/executor.py` | `CodeExecutor`, `TestResult`, `ExecutionResult` | `problems.problem`, `runner.py` (as a file in the same folder) |
-| `execution/grading.py` | `grade_on_public`, `pick_solution`: grade code leaves and choose the solution | `execution.executor`, `problems.problem`, `reasoning_node` |
+| `execution/grading.py` | `grade_on_public`, `pick_solution`, `branch_value`, `pick_by_branch`: grade code leaves and choose the solution | `execution.executor`, `problems.problem`, `reasoning_node` |
 | `problems/problem.py` | `TestCase`, `Problem` | — |
 | `problems/two_sum.py` | `TWO_SUM` | `problems.problem` |
 
@@ -347,6 +347,9 @@ Two programs talking through stdin/stdout in JSON.
 File: `reasoning_graphs/execution/grading.py`. Shared by the demo and, later, by every system and baseline, so they all grade and choose in the same way.
 - `grade_on_public(leaves, problem, executor) -> dict[int, ExecutionResult]`: runs each leaf's `code` on the problem's **public tests only** and returns the results keyed by `node.id`. It prints nothing: presentation is left to the caller.
 - `pick_solution(leaves, public_results) -> ReasoningNode | None`: the **first** leaf, in the given order, that passes every public test; `None` if none does (or there are no leaves). Choosing by score instead of order will replace this rule once an evaluator exists.
+- `branch_value(leaf) -> float`: the score of the leaf's parent, i.e. the last reasoning step before the code — the most informed estimate of its branch, since a score is a value that already looks ahead to the code. `-1.0` if the parent has no score (code written directly under the root, or a tree grown without an evaluator): below any real score, so it never ties with a branch scored 0.
+- `pick_by_branch(leaves, public_results) -> ReasoningNode | None`: among the leaves passing every public test, the one with the highest `branch_value`; ties go to the first one in the given order; `None` if none passes. A failing leaf never wins, whatever its branch. Code written directly under the root (no evidence about its branch: it may pass the public tests by chance, like the adjacent-pairs solution) is not excluded but ranked last, so it is chosen only when nothing else passes. On a tree without scores every value is -1 and it behaves exactly like `pick_solution`.
+- Why the parent's score and not a combination of the whole path: a sum or a product depends on the path's length (early code has fewer terms); a mean weighs equally the early, less informed estimates. The mean remains an alternative to test (§10).
 - Measuring the chosen solution on the hidden tests stays with the caller (`executor.run(chosen.code, problem.function_name, problem.hidden_tests)`, only when `chosen` is not `None`).
 
 ### 4.10 Demo ✅
@@ -382,7 +385,7 @@ Observations:
 - Branch quality differs visibly: every leaf under "Start with the index 0" passes the public tests, every leaf under the two-pointer strategy fails (Two Sum asks for original indices, which sorting loses). This difference between branches is what a rollout score is meant to capture.
 
 ### 4.11 Tests ✅
-Automatic tests live in `tests/` and run with `pytest` from the project root (`HF_HUB_OFFLINE=1 pytest` to avoid network calls). `pytest.ini` sets `pythonpath = .` (so tests can import the `reasoning_graphs` package and `main`) and `testpaths = tests`. `tests/` mirrors the package layout: tests of `reasoning_graphs/<sub>/<module>.py` live in `tests/<sub>/`, tests of the top-level modules and of the demo in `tests/` itself; test file names are unique across folders. 95 tests, about 5 seconds. Modules contain only code: no test code in `if __name__ == "__main__":` blocks.
+Automatic tests live in `tests/` and run with `pytest` from the project root (`HF_HUB_OFFLINE=1 pytest` to avoid network calls). `pytest.ini` sets `pythonpath = .` (so tests can import the `reasoning_graphs` package and `main`) and `testpaths = tests`. `tests/` mirrors the package layout: tests of `reasoning_graphs/<sub>/<module>.py` live in `tests/<sub>/`, tests of the top-level modules and of the demo in `tests/` itself; test file names are unique across folders. 106 tests, about 5 seconds. Modules contain only code: no test code in `if __name__ == "__main__":` blocks.
 
 | Test file (under `tests/`) | What it checks |
 |---|---|
@@ -396,7 +399,7 @@ Automatic tests live in `tests/` and run with `pytest` from the project root (`H
 | `search/test_expand.py` | With a spy generator: root expansion (cleaning, dedup, terminal code node), forced code at max depth (prompt ends with `Code:`, `code_branching` used), terminal node not expanded (generator not called), all-invalid outputs → no children |
 | `problems/test_two_sum.py` | Test counts; every Two Sum test matches a reference solution; no hidden test appears in the prompt; no prompt line starts with `Step` |
 | `execution/test_executor.py` | Correct, values instead of indices, partially right, exception, wrong function name, infinite loop (timeout within `timeout + 1` s), `os._exit`, no tests, all 7 Two Sum tests, verdicts on the demo's codes |
-| `execution/test_grading.py` | `grade_on_public` on a correct and a partially right leaf (keys are the leaves' ids, public tests only); `pick_solution` with hand-built results: first passing leaf when it isn't the first leaf, first of several passing, none passing, no leaves |
+| `execution/test_grading.py` | `grade_on_public` on a correct and a partially right leaf (keys are the leaves' ids, public tests only); `pick_solution` with hand-built results: first passing leaf when it isn't the first leaf, first of several passing, none passing, no leaves; `branch_value` (scored branch, 0 is a real score, -1 under the root); `pick_by_branch`: best branch, failing leaves never win, direct code loses even to a branch scored 0 but is kept when alone, ties, none passing, no leaves, same as `pick_solution` without scores |
 | `test_demo.py` | Runs `main.main()`, whose own assertions check the whole demo |
 | `generators/test_hf.py` | `StopAtNextStep` on a hand-built `input_ids` table (tokenizer only, no model): stops exactly the sequences whose new text started `Step`/`Code:`; a `"\nStep"` spanning the prompt boundary does not stop |
 
@@ -551,6 +554,7 @@ Steps 1–6 make up the complete project; 7–8 are the added value.
 
 - Prompt tuning: the current system prompt and few-shot example work on Two Sum; to be re-checked on a dataset (rate of valid outputs, multi-line steps). Stopping at the first `\n` instead of the next label is an option if multi-line steps become a problem.
 - Sampling defaults (`temperature`, `top_p`) and `max_new_tokens` for longer solutions.
+- Choosing among passing leaves: parent's score (current) vs mean of the path's scores.
 - Default values for the per-level branching and maximum depth (to be tuned by experiments; starting point `[4, 2, 2]`).
 - Number of rollouts per node (cost vs noise); all-or-nothing vs partial credit on tests.
 - Number of public tests per problem.
