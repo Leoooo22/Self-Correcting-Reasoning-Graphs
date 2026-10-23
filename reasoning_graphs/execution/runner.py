@@ -1,8 +1,10 @@
 """Runs model-generated code on test cases. Meant to be launched in a separate process.
 
-Input (stdin, JSON):  {"code": str, "function_name": str, "tests": [{"args": list, "expected": any}]}
+Input (stdin, JSON):  {"code": str, "function_name": str, "tests": [{"args": str, "expected": any}]}
+    where "args" is the Python literal of the argument list (e.g. "[(1, 2), 'a']"), so tuples stay tuples
 Output (stdout, JSON): {"results": [{"status": "passed" | "failed" | "error", "actual": any, "error": str | None}]}
 """
+import ast
 import contextlib
 import io
 import json
@@ -17,7 +19,7 @@ def run_test(func, test: dict) -> dict:
     try:
         # The model's prints must not end up in our JSON output
         with contextlib.redirect_stdout(io.StringIO()):
-            result = func(*test["args"])
+            result = func(*ast.literal_eval(test["args"]))
     except (Exception, SystemExit) as error:
         return {"status": "error", "actual": None, "error": error_message(error)}
 

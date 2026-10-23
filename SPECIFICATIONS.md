@@ -61,7 +61,7 @@ Self-Correcting-Reasoning-Graphs/
 │   ├── generators/    base.py, hf.py
 │   ├── search/        expand.py, full_tree.py, rollout.py, evaluator.py, beam.py
 │   ├── execution/     executor.py, runner.py, grading.py
-│   └── problems/      problem.py, two_sum.py
+│   └── problems/      problem.py, two_sum.py, mbpp.py
 ├── tests/             same layout as the package (§4.11)
 ├── main.py
 ├── hf_tree.py
@@ -88,6 +88,7 @@ Self-Correcting-Reasoning-Graphs/
 | `execution/grading.py` | `grade_on_public`, `pick_solution`, `branch_value`, `pick_by_branch`: grade code leaves and choose the solution | `execution.executor`, `problems.problem`, `reasoning_node` |
 | `problems/problem.py` | `TestCase`, `Problem` | — |
 | `problems/two_sum.py` | `TWO_SUM` | `problems.problem` |
+| `problems/mbpp.py` | MBPP adapter: `parse_assert`, `function_signature`, `mbpp_to_problem`, `load_mbpp` | `problems.problem`, `step_format`, `datasets` (inside `load_mbpp` only) |
 
 | At the project root | Contents |
 |---|---|
@@ -325,15 +326,26 @@ File: `reasoning_graphs/problems/two_sum.py`.
 - 2 public tests; 5 hidden tests, each targeting a typical bug: duplicates (`[3, 3]`), negative numbers, zeros with target 0, pair at the end, first element not in the pair.
 - Checked by `tests/problems/test_two_sum.py`: a reference solution passes all 7 tests; no hidden test appears in the prompt; no prompt line starts with `Step`.
 
-Later: one adapter per dataset converts its format into `Problem`/`TestCase` with an automatic public/hidden split (`TestCase` may need a raw-`assert` kind for some datasets); datasets from Hugging Face (`datasets` library): MBPP, HumanEval, then LeetCodeDataset / LiveCodeBench.
+**MBPP** — file `reasoning_graphs/problems/mbpp.py`. Adapter from the sanitized MBPP dataset (`google-research-datasets/mbpp`, config `sanitized`, Hugging Face `datasets` library) to `Problem`.
+- Splits: `train` (120 records), `validation` (43), `test` (257), `prompt` (7, meant as few-shot examples). **Evaluation uses `test`**; `train` is for collecting PRM data and `validation` for tuning, so that the problems a PRM is trained on are never the ones it is evaluated on (§7, rule 2), and results are comparable with the literature.
+- A record has `task_id`, `prompt` (the statement), `code` (a reference solution), `test_list` (usually 3, sometimes 4–5 lines `assert ...`) and `test_imports` (non-empty only for the 13 test-split problems whose tests use `math.isclose`).
+- `parse_assert(line) -> (function_name, TestCase) | None`: parses the line with `ast` and accepts exactly `assert name(arg, ...) == expected`: one statement, an `Assert` whose test is a `Compare` with a single `Eq`, a `Call` on a plain `Name` on the left, no keyword arguments; every argument and the expected value must be literals (`ast.literal_eval`: numbers, strings, tuples, lists, dicts, sets, booleans, `None`) and the expected value must be JSON-serializable (the runner compares through JSON, so a set is not allowed there). Anything else → `None`.
+- `function_signature(code, name) -> str | None`: the `def name(params):` line of the function called `name` in the reference code (found with `ast.walk`, rebuilt with `ast.unparse`, so spacing is normalized), or `None`.
+- `mbpp_to_problem(record) -> Problem | None`: every test must parse, all must call the same function, and that function must exist in the reference code; then `name = "mbpp_<task_id>"`, `statement = "Problem: " + prompt` (same shape as Two Sum and the few-shot example), the signature from the reference code, **the first test public and the others hidden** (`NUM_PUBLIC_TESTS = 1`). A problem whose prompt has a line starting with `Step` or `Code:` is rejected too, since `split_prompt` would cut there. Otherwise `None`.
+- `load_mbpp(split="test") -> list[Problem]`: downloads the split (cached after the first time) and keeps the convertible problems. `datasets` is imported inside the function, so the rest of the package does not need it.
+- **Kept**: 239 / 257 test problems, 112 / 120 train, 41 / 43 validation. All 18 excluded test problems have at least one test in another shape: `math.isclose(...)` on floats (rounding errors make `==` unreliable) or `set(...) == set(...)` for outputs whose order does not matter. Results on MBPP therefore refer to this subset, which under-represents floating-point problems. Supporting tolerances and sets in `TestCase` and the runner is a possible extension.
+- Check (run once, not an automatic test, since it needs the download): the reference solution of every kept test problem passes all its parsed tests.
+- **Why one public test**: the public test is shown in the prompt and guides the search; the hidden ones decide the final measure. One public / two hidden makes the search's filter weaker (a wrong program passes one test by chance more easily) but the final measure more reliable (a lucky program must also pass two unseen tests). Branch scores and `pick_by_branch` partly compensate for the weaker filter.
+
+Later: HumanEval, then LeetCodeDataset / LiveCodeBench, each with its own adapter.
 
 ### 4.9 `CodeExecutor`: safe execution ✅
 Two programs talking through stdin/stdout in JSON.
 
 **`reasoning_graphs/execution/runner.py`** (child process):
-- Input: `{"code", "function_name", "tests": [{"args", "expected"}]}`. Empty input → `{"results": []}`.
+- Input: `{"code", "function_name", "tests": [{"args", "expected"}]}`, where `args` is the **Python literal** of the argument list (`repr(list(args))`, read back with `ast.literal_eval`): JSON would turn tuples into lists, and a function that checks `isinstance(x, tuple)` would then fail on correct code. `expected` travels as JSON. Empty input → `{"results": []}`.
 - `exec`s the code in its own namespace, with stdout redirected so model prints can't corrupt the JSON output. Any `Exception` or `SystemExit` during setup, or no callable named `function_name` → every test is `error` with that message.
-- For each test: calls `func(*args)` with stdout redirected; an exception → `error` (`"TypeName: message"`). The result is normalized through JSON (`json.loads(json.dumps(result))`, so a tuple equals a list); not serializable → `failed`. Then `passed` if it equals `expected`, otherwise `failed`.
+- For each test: calls `func(*args)` (arguments rebuilt from their literal) with stdout redirected; an exception → `error` (`"TypeName: message"`). The result is normalized through JSON (`json.loads(json.dumps(result))`, so a tuple equals a list); not serializable → `failed`. Then `passed` if it equals `expected`, otherwise `failed`.
 - Output: `{"results": [{"status", "actual", "error"}]}`, one per test, in order.
 
 **`reasoning_graphs/execution/executor.py`**:
@@ -385,7 +397,7 @@ Observations:
 - Branch quality differs visibly: every leaf under "Start with the index 0" passes the public tests, every leaf under the two-pointer strategy fails (Two Sum asks for original indices, which sorting loses). This difference between branches is what a rollout score is meant to capture.
 
 ### 4.11 Tests ✅
-Automatic tests live in `tests/` and run with `pytest` from the project root (`HF_HUB_OFFLINE=1 pytest` to avoid network calls). `pytest.ini` sets `pythonpath = .` (so tests can import the `reasoning_graphs` package and `main`) and `testpaths = tests`. `tests/` mirrors the package layout: tests of `reasoning_graphs/<sub>/<module>.py` live in `tests/<sub>/`, tests of the top-level modules and of the demo in `tests/` itself; test file names are unique across folders. 106 tests, about 5 seconds. Modules contain only code: no test code in `if __name__ == "__main__":` blocks.
+Automatic tests live in `tests/` and run with `pytest` from the project root (`HF_HUB_OFFLINE=1 pytest` to avoid network calls). `pytest.ini` sets `pythonpath = .` (so tests can import the `reasoning_graphs` package and `main`) and `testpaths = tests`. `tests/` mirrors the package layout: tests of `reasoning_graphs/<sub>/<module>.py` live in `tests/<sub>/`, tests of the top-level modules and of the demo in `tests/` itself; test file names are unique across folders. 128 tests, about 5 seconds. Modules contain only code: no test code in `if __name__ == "__main__":` blocks.
 
 | Test file (under `tests/`) | What it checks |
 |---|---|
@@ -398,7 +410,8 @@ Automatic tests live in `tests/` and run with `pytest` from the project root (`H
 | `search/test_beam.py` | With a scripted generator and a fixed-score evaluator: keeps exactly the best `beam_width` nodes at each level (only they are expanded; pruned nodes keep their score and get no children); every node except the root is scored once; code children don't take beam slots; stops when every child is code; ties keep creation order; a beam wider than the candidates keeps them all |
 | `search/test_expand.py` | With a spy generator: root expansion (cleaning, dedup, terminal code node), forced code at max depth (prompt ends with `Code:`, `code_branching` used), terminal node not expanded (generator not called), all-invalid outputs → no children |
 | `problems/test_two_sum.py` | Test counts; every Two Sum test matches a reference solution; no hidden test appears in the prompt; no prompt line starts with `Step` |
-| `execution/test_executor.py` | Correct, values instead of indices, partially right, exception, wrong function name, infinite loop (timeout within `timeout + 1` s), `os._exit`, no tests, all 7 Two Sum tests, verdicts on the demo's codes |
+| `execution/test_executor.py` | Correct, values instead of indices, partially right, exception, wrong function name, infinite loop (timeout within `timeout + 1` s), `os._exit`, no tests, all 7 Two Sum tests, verdicts on the demo's codes, tuple arguments (nested too) reach the function as tuples |
+| `problems/test_mbpp.py` | With hand-made records (no download): `parse_assert` on simple shapes (strings; tuples, lists, dicts; no arguments; a set argument) and rejection of 11 other shapes (`math.isclose`, call on the left, non-literal or set expected value, keyword argument, `!=`, chained comparison, no comparison, not an assert, two statements, syntax error); `function_signature` (found among several functions, defaults and `*rest` kept, missing → `None`); `mbpp_to_problem` fields and the 1 public / rest hidden split; rejection for a test in another shape, tests calling different functions, function missing from the reference code, prompt line starting with a label |
 | `execution/test_grading.py` | `grade_on_public` on a correct and a partially right leaf (keys are the leaves' ids, public tests only); `pick_solution` with hand-built results: first passing leaf when it isn't the first leaf, first of several passing, none passing, no leaves; `branch_value` (scored branch, 0 is a real score, -1 under the root); `pick_by_branch`: best branch, failing leaves never win, direct code loses even to a branch scored 0 but is kept when alone, ties, none passing, no leaves, same as `pick_solution` without scores |
 | `test_demo.py` | Runs `main.main()`, whose own assertions check the whole demo |
 | `generators/test_hf.py` | `StopAtNextStep` on a hand-built `input_ids` table (tokenizer only, no model): stops exactly the sequences whose new text started `Step`/`Code:`; a `"\nStep"` spanning the prompt boundary does not stop |
@@ -518,7 +531,7 @@ Same model and same prompt builder as `HFGenerator`, served by vLLM on a cloud G
 
 - **Python** 3.12 (venv in `.venv`)
 - **`torch`** 2.14, **`transformers`** 5.19: local models. In this version `from_pretrained` takes `dtype=` (not the older `torch_dtype=`).
-- **`datasets`**: loading problem datasets (not used yet)
+- **`datasets`** 5.1: loading MBPP. Dataset ids must be `namespace/name` (`google-research-datasets/mbpp`, not `mbpp`).
 - **`peft`**: LoRA for PRM training (not used yet)
 - **vLLM**: fast generation on Linux/cloud GPUs (not available on the Mac)
 - **`subprocess`** (standard library): safe code execution
@@ -540,8 +553,8 @@ Same model and same prompt builder as `HFGenerator`, served by vLLM on a cloud G
 | 3a+ | Reorganize the modules into the `reasoning_graphs` package | ✅ done |
 | 3b | First real tree on Two Sum: `grow_full_tree`, `grading.py`, `config.num_candidates`, `hf_tree.py` with measurements (§4.10b) | ✅ done |
 | 4 | `Evaluator` + `RolloutEvaluator`, `rollout`, `ReasoningNode.detached_copy`, real-model check `hf_scores.py` | ✅ done |
-| 5 | Beam search (`search/beam.py`, `beam_width` in `SearchConfig`) | 🔲 in progress: score-based selection of the solution and real-model run still to do |
-| 6 | Baselines (single, Best-of-N) and comparison on MBPP / HumanEval | 🔲 |
+| 5 | Beam search (`search/beam.py`, `beam_width` in `SearchConfig`), branch-based solution choice (`pick_by_branch`) | ✅ done (real-model run deferred to the step-6 comparison) |
+| 6 | Baselines (single, Best-of-N) and comparison on MBPP / HumanEval | 🔲 in progress: 6a MBPP adapter ✅; 6b baselines, 6c experiment runner, 6d pilot run to do |
 | 7 | Repair step from errors | 🔲 added value |
 | 8 | Data collection + PRM training (`LearnedPRM`) | 🔲 advanced |
 | 9 | `VLLMGenerator` on a cloud GPU, larger datasets | 🔲 scalability |
@@ -557,5 +570,5 @@ Steps 1–6 make up the complete project; 7–8 are the added value.
 - Choosing among passing leaves: parent's score (current) vs mean of the path's scores.
 - Default values for the per-level branching and maximum depth (to be tuned by experiments; starting point `[4, 2, 2]`).
 - Number of rollouts per node (cost vs noise); all-or-nothing vs partial credit on tests.
-- Number of public tests per problem.
-- Starting dataset (MBPP or HumanEval).
+- Number of public tests per problem: 1 for MBPP (decided); revisit if the search's filter proves too weak.
+- Supporting float tolerances and sets, to bring back the 18 excluded MBPP test problems.

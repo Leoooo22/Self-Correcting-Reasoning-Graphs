@@ -4,6 +4,7 @@ import pytest
 
 import main as demo
 from reasoning_graphs.execution.executor import CodeExecutor
+from reasoning_graphs.problems.problem import TestCase as Case
 from reasoning_graphs.problems.two_sum import TWO_SUM
 from reasoning_graphs.step_format import extract_code
 
@@ -90,3 +91,10 @@ def test_reference_passes_all_two_sum_tests(executor):
 ])
 def test_demo_codes_get_the_right_verdict(executor, block, should_pass):
     assert executor.run(extract_code(block), "two_sum", ALL_TESTS).all_passed == should_pass
+
+
+def test_tuple_arguments_stay_tuples(executor):
+    # Arguments travel as Python literals: a function that checks the type must see a tuple, not a list
+    code = "def f(x):\n    return isinstance(x, tuple) and isinstance(x[1], tuple)"
+    tests = [Case([(1, (2, 3))], True)]
+    assert executor.run(code, "f", tests).all_passed

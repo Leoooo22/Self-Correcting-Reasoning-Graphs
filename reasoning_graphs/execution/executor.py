@@ -41,7 +41,8 @@ class CodeExecutor:
         payload = json.dumps({
             "code": code,
             "function_name": function_name,
-            "tests": [{"args": t.args, "expected": t.expected} for t in tests],
+            # Arguments travel as a Python literal, not as JSON: JSON would turn tuples into lists
+            "tests": [{"args": repr(list(t.args)), "expected": t.expected} for t in tests],
         })
 
         # Run in a temporary directory, so files created by the model's code don't end up in the project
