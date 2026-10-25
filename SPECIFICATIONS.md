@@ -37,8 +37,8 @@ Problems don't have to come from LeetCode. What matters is that they follow the 
 
 ```
                 ┌──────────────────┐
-  Problem  ───▶ │   Search         │ ◀──── Evaluator (rollout / PRM)        🔲
-  + public      │ (beam search) 🔲 │              │
+  Problem  ───▶ │   Search         │ ◀──── Evaluator: rollouts ✅ / PRM 🔲
+  + public      │ (beam search) ✅ │              │
   tests         └──────┬───────────┘              ▼
                        │ expand ✅          CodeExecutor (tests) ✅
                        ▼
@@ -50,7 +50,7 @@ Problems don't have to come from LeetCode. What matters is that they follow the 
 
 ### 3.2 Files
 
-The project code is the `reasoning_graphs` package, split into subpackages by role. Every folder has an (empty) `__init__.py`. The demo, the tests and the configuration stay at the project root.
+The project code is the `reasoning_graphs` package, split into subpackages by role. Every folder has an (empty) `__init__.py`. Runnable scripts live in `scripts/`; tests, configuration and documentation stay at the project root.
 
 ```
 Self-Correcting-Reasoning-Graphs/
@@ -58,16 +58,16 @@ Self-Correcting-Reasoning-Graphs/
 │   ├── reasoning_node.py
 │   ├── config.py
 │   ├── step_format.py
-│   ├── generators/    base.py, hf.py
-│   ├── search/        expand.py, full_tree.py, rollout.py, evaluator.py, beam.py
+│   ├── generators/    base.py, hf.py, counting_generator.py
+│   ├── search/        expand.py, full_tree.py, rollout.py, evaluator.py, beam.py, baselines.py
 │   ├── execution/     executor.py, runner.py, grading.py
 │   └── problems/      problem.py, two_sum.py, mbpp.py
+├── scripts/           demo.py, hf_tree.py, hf_scores.py, run_experiment.py
 ├── tests/             same layout as the package (§4.11)
-├── main.py
-├── hf_tree.py
-├── hf_scores.py
+├── results/           experiment outputs (not versioned)
 ├── pytest.ini
 ├── requirements.txt
+├── README.md
 └── SPECIFICATIONS.md
 ```
 
@@ -78,11 +78,13 @@ Self-Correcting-Reasoning-Graphs/
 | `step_format.py` | Step labels, parser, formatter, prompt builder (system prompt, few-shot example, `split_prompt`, `build_messages`) | — |
 | `generators/base.py` | `StepGenerator` interface, `MockGenerator` | `step_format` |
 | `generators/hf.py` | `HFGenerator` (real model via `transformers`), `StopAtNextStep` | `generators.base`, `step_format`, `torch`, `transformers` |
+| `generators/counting_generator.py` | `CountingGenerator`: counts calls and requested outputs of any generator | `generators.base` |
 | `search/expand.py` | `expand` | `reasoning_node`, `generators.base`, `config`, `step_format` |
 | `search/full_tree.py` | `grow_full_tree`: expands every node | `search.expand` |
 | `search/rollout.py` | `rollout`: one branch from a node down to code | `search.expand`, `config`, `reasoning_node` |
 | `search/evaluator.py` | `Evaluator` interface, `RolloutEvaluator` | `search.rollout`, `execution.executor`, `problems.problem` |
 | `search/beam.py` | `beam_search` | `search.expand`, `search.evaluator`, `config` |
+| `search/baselines.py` | `best_of_n` (single generation is `n = 1`), `best_within_budget` | `search.rollout`, `generators.counting_generator` |
 | `execution/runner.py` | Child process that executes model code on the tests | standard library only |
 | `execution/executor.py` | `CodeExecutor`, `TestResult`, `ExecutionResult` | `problems.problem`, `runner.py` (as a file in the same folder) |
 | `execution/grading.py` | `grade_on_public`, `pick_solution`, `branch_value`, `pick_by_branch`: grade code leaves and choose the solution | `execution.executor`, `problems.problem`, `reasoning_node` |
@@ -90,15 +92,21 @@ Self-Correcting-Reasoning-Graphs/
 | `problems/two_sum.py` | `TWO_SUM` | `problems.problem` |
 | `problems/mbpp.py` | MBPP adapter: `parse_assert`, `function_signature`, `mbpp_to_problem`, `load_mbpp` | `problems.problem`, `step_format`, `datasets` (inside `load_mbpp` only) |
 
-| At the project root | Contents |
+| Script (under `scripts/`, run with `python -m scripts.<name>`) | Contents |
 |---|---|
-| `main.py` | End-to-end demo with the mock generator (uses everything except `generators.hf`); also defines `print_public_results` |
+| `demo.py` | End-to-end demo with the mock generator, no model needed (uses everything except `generators.hf`); also defines `print_public_results` |
 | `hf_tree.py` | Full tree on Two Sum with the real model, with measurements (§4.10b) |
 | `hf_scores.py` | Rollout scores of the first-level branches of Two Sum with the real model (§4.12) |
+| `run_experiment.py` | MBPP comparison of beam search, Best-of-N at equal compute and single generation (§6.1) |
+
+| At the project root | Contents |
+|---|---|
+| `README.md` | Project overview for readers of the repository |
 | `tests/` | `pytest` tests (§4.11) |
 | `pytest.ini` | `pytest` configuration |
+| `results/` | JSONL outputs of the experiments, ignored by git |
 
-**Imports** are absolute from the package root: `from reasoning_graphs.step_format import parse_step`, `from reasoning_graphs.generators.base import StepGenerator`. They work when Python runs from the project root: `python main.py`, `pytest`, or a module run with `-m` (`python -m reasoning_graphs.generators.hf`). Running a package file by its path (`python reasoning_graphs/generators/hf.py`) fails with `ModuleNotFoundError`, because Python then only sees that file's folder.
+**Imports** are absolute from the package root: `from reasoning_graphs.step_format import parse_step`, `from reasoning_graphs.generators.base import StepGenerator`. They work when Python runs from the project root: `pytest`, or a module run with `-m` (`python -m scripts.demo`, `python -m reasoning_graphs.generators.hf`). Running a file by its path (`python scripts/demo.py`) fails with `ModuleNotFoundError`, because Python then only sees that file's folder.
 
 `generators/hf.py` is separate from `generators/base.py` so that the mock, the parser and their tests never need `torch` loaded.
 
@@ -296,6 +304,12 @@ File: `reasoning_graphs/generators/hf.py`. Implements `StepGenerator` with a Hug
 - A step may span several lines when the following lines don't start with `Step`; generation then stops at the next `Step`/`Code:` and the parser keeps the multi-line step.
 - Well-formatted code can still be wrong (e.g. `nums.index(complement)` reusing the same element): format is checked by the parser, correctness only by the tests.
 
+### 4.6b `CountingGenerator`: measuring cost ✅
+File: `reasoning_graphs/generators/counting_generator.py`. `CountingGenerator(generator)` is itself a `StepGenerator` that wraps another one: `generate_steps(prompt, n)` adds 1 to `calls` and `n` to `outputs`, then returns the wrapped generator's answer unchanged.
+- Every generator call of every system (expansions, rollouts inside the evaluator, baselines) goes through `generate_steps` of the generator the caller passed in, so wrapping that one generator counts everything without touching any search code.
+- `outputs` is the cost measure for comparisons at equal compute: one call with `n` outputs samples `n` sequences in parallel from the same prompt, costing more than a call with `n = 1` (though less than `n` separate calls). `calls` is kept as well, e.g. to relate cost to latency.
+- Usage: one counter per (system, problem), around a model loaded once.
+
 ### 4.7 `expand`: growing the tree ✅
 File: `reasoning_graphs/search/expand.py`. `expand(node, generator, config) -> list[ReasoningNode]`.
 1. Terminal node → `[]`, and the generator is not called.
@@ -365,14 +379,14 @@ File: `reasoning_graphs/execution/grading.py`. Shared by the demo and, later, by
 - Measuring the chosen solution on the hidden tests stays with the caller (`executor.run(chosen.code, problem.function_name, problem.hidden_tests)`, only when `chosen` is not `None`).
 
 ### 4.10 Demo ✅
-File: `main.py`. End-to-end run with `MockGenerator` on Two Sum:
+File: `scripts/demo.py` (run: `python -m scripts.demo`). End-to-end run with `MockGenerator` on Two Sum:
 - Mock candidates include a valid hash-map solution, a valid brute-force solution, a **valid-but-wrong** solution (returns values instead of indices), a syntax error, an empty step and an early code step at the root. Seed 6 is chosen so these cases actually occur.
 - Grows the full tree with `grow_full_tree` (§4.7b); prints it.
 - Grades every code leaf on the **public tests** with `grade_on_public`, prints one line per leaf with `print_public_results` (verdict, first step of the branch, failed tests), picks a solution with `pick_solution`, and measures it on the **hidden tests**.
 - Asserts: every leaf is terminal; no node deeper than `max_steps + 1`; reasoning steps numbered by depth; no syntax error accepted; the executor rejects exactly the wrong-but-valid code; the chosen code passes all hidden tests.
 
 ### 4.10b Real-model tree ✅
-File: `hf_tree.py` (run: `HF_HUB_OFFLINE=1 python hf_tree.py`, about one minute). Same flow as the demo, with `HFGenerator` and no assumption about what the model produces:
+File: `scripts/hf_tree.py` (run: `HF_HUB_OFFLINE=1 python -m scripts.hf_tree`, about one minute). Same flow as the demo, with `HFGenerator` and no assumption about what the model produces:
 1. `grow_full_tree` with the default `SearchConfig`, timed; prints the tree.
 2. Statistics. Every non-terminal node was expanded exactly once, so: generator calls = number of non-terminal nodes; outputs requested = sum of `config.num_candidates(depth)` over them; outputs lost = requested − children created (invalid or duplicate); dead ends = leaves that are not terminal (every output of their expansion was discarded); nodes per depth.
 3. `grade_on_public` (timed), `print_public_results`, number of code leaves passing the public tests.
@@ -397,7 +411,7 @@ Observations:
 - Branch quality differs visibly: every leaf under "Start with the index 0" passes the public tests, every leaf under the two-pointer strategy fails (Two Sum asks for original indices, which sorting loses). This difference between branches is what a rollout score is meant to capture.
 
 ### 4.11 Tests ✅
-Automatic tests live in `tests/` and run with `pytest` from the project root (`HF_HUB_OFFLINE=1 pytest` to avoid network calls). `pytest.ini` sets `pythonpath = .` (so tests can import the `reasoning_graphs` package and `main`) and `testpaths = tests`. `tests/` mirrors the package layout: tests of `reasoning_graphs/<sub>/<module>.py` live in `tests/<sub>/`, tests of the top-level modules and of the demo in `tests/` itself; test file names are unique across folders. 128 tests, about 5 seconds. Modules contain only code: no test code in `if __name__ == "__main__":` blocks.
+Automatic tests live in `tests/` and run with `pytest` from the project root (`HF_HUB_OFFLINE=1 pytest` to avoid network calls). `pytest.ini` sets `pythonpath = .` (so tests can import the `reasoning_graphs` and `scripts` packages) and `testpaths = tests`. `tests/` mirrors the package layout: tests of `reasoning_graphs/<sub>/<module>.py` live in `tests/<sub>/`, tests of the top-level modules and of the demo in `tests/` itself; test file names are unique across folders. 137 tests, about 5 seconds. Modules contain only code: no test code in `if __name__ == "__main__":` blocks.
 
 | Test file (under `tests/`) | What it checks |
 |---|---|
@@ -408,12 +422,14 @@ Automatic tests live in `tests/` and run with `pytest` from the project root (`H
 | `search/test_rollout.py` | With a scripted spy generator: reaches code with one output per call and code forced at the search's max depth; early code ends the rollout; an invalid output → `None`; a code node is returned as is without calling the generator; the real tree is unchanged |
 | `search/test_evaluator.py` | With a scripted generator and a spy executor: score is the fraction of passing rollouts (1, 0, 0.5, and 0.75 with a stuck rollout); only public tests are run; stuck rollouts are not executed; a code node is scored by its own tests with one execution and no generator call; the real tree is unchanged; `n` < 1 rejected |
 | `search/test_beam.py` | With a scripted generator and a fixed-score evaluator: keeps exactly the best `beam_width` nodes at each level (only they are expanded; pruned nodes keep their score and get no children); every node except the root is scored once; code children don't take beam slots; stops when every child is code; ties keep creation order; a beam wider than the candidates keeps them all |
+| `generators/test_counting_generator.py` | Counts calls and outputs and passes answers and requests through unchanged; counts everything an expansion and a rollout ask (1 call of 4 outputs + 3 calls of 1) |
+| `search/test_baselines.py` | With a scripted generator: `n` independent solutions from the root, unscored, root left without children; stuck rollouts left out but their calls counted; `n = 1` is one full rollout down to forced code; without scores the choice is the first passing solution; `n` < 1 rejected; `best_within_budget` stops once the budget of new outputs is spent (overshooting rather than stopping short) and always makes at least one rollout |
 | `search/test_expand.py` | With a spy generator: root expansion (cleaning, dedup, terminal code node), forced code at max depth (prompt ends with `Code:`, `code_branching` used), terminal node not expanded (generator not called), all-invalid outputs → no children |
 | `problems/test_two_sum.py` | Test counts; every Two Sum test matches a reference solution; no hidden test appears in the prompt; no prompt line starts with `Step` |
 | `execution/test_executor.py` | Correct, values instead of indices, partially right, exception, wrong function name, infinite loop (timeout within `timeout + 1` s), `os._exit`, no tests, all 7 Two Sum tests, verdicts on the demo's codes, tuple arguments (nested too) reach the function as tuples |
 | `problems/test_mbpp.py` | With hand-made records (no download): `parse_assert` on simple shapes (strings; tuples, lists, dicts; no arguments; a set argument) and rejection of 11 other shapes (`math.isclose`, call on the left, non-literal or set expected value, keyword argument, `!=`, chained comparison, no comparison, not an assert, two statements, syntax error); `function_signature` (found among several functions, defaults and `*rest` kept, missing → `None`); `mbpp_to_problem` fields and the 1 public / rest hidden split; rejection for a test in another shape, tests calling different functions, function missing from the reference code, prompt line starting with a label |
 | `execution/test_grading.py` | `grade_on_public` on a correct and a partially right leaf (keys are the leaves' ids, public tests only); `pick_solution` with hand-built results: first passing leaf when it isn't the first leaf, first of several passing, none passing, no leaves; `branch_value` (scored branch, 0 is a real score, -1 under the root); `pick_by_branch`: best branch, failing leaves never win, direct code loses even to a branch scored 0 but is kept when alone, ties, none passing, no leaves, same as `pick_solution` without scores |
-| `test_demo.py` | Runs `main.main()`, whose own assertions check the whole demo |
+| `test_demo.py` | Runs `scripts.demo.main()`, whose own assertions check the whole demo |
 | `generators/test_hf.py` | `StopAtNextStep` on a hand-built `input_ids` table (tokenizer only, no model): stops exactly the sequences whose new text started `Step`/`Code:`; a `"\nStep"` spanning the prompt boundary does not stop |
 
 Conventions:
@@ -447,7 +463,7 @@ File: `reasoning_graphs/search/evaluator.py`.
 - The real tree is never modified (rollouts work on detached copies). `node.score` is not set: the caller decides where to store the score.
 - Cost: up to `n × (max_steps − depth + 1)` generator calls and up to `n` executions per node.
 
-**Real-model check** — `hf_scores.py` (run: `HF_HUB_OFFLINE=1 python hf_scores.py`, about 3 minutes): expands the root once (same seed and first call as `hf_tree.py`, so the same four first steps), then scores each first-level node with `RolloutEvaluator(n=8)` and stores it in `node.score`.
+**Real-model check** — `scripts/hf_scores.py` (run: `HF_HUB_OFFLINE=1 python -m scripts.hf_scores`, about 3 minutes): expands the root once (same seed and first call as `scripts/hf_tree.py`, so the same four first steps), then scores each first-level node with `RolloutEvaluator(n=8)` and stores it in `node.score`.
 
 Measured (2026-10-20, Qwen2.5-Coder-0.5B, seed 0), next to the share of that branch's leaves passing the public tests in the full tree of §4.10b:
 
@@ -483,6 +499,17 @@ Same level-by-level loop as `grow_full_tree` (§4.7b), but the frontier is restr
 
 Possible extension: MCTS (reuses rollout nodes instead of discarding them).
 
+### 4.13b Baselines ✅
+File: `reasoning_graphs/search/baselines.py`. `best_of_n(root, generator, config, n) -> list[ReasoningNode]`.
+- `n` independent complete solutions: `n` rollouts from the root (§4.11b), with the same `config` as the search, so the same step format, maximum depth and forced code. No evaluator and no scores: every returned node has `score = None`.
+- Returns the code nodes reached; stuck rollouts (`None`) are left out, so the list holds only code nodes and can go straight to `grade_on_public`. Their number is `n − len(result)`; they still cost generator calls.
+- The nodes live on detached copies: the root itself gets no children.
+- **Single generation** is `best_of_n(..., n=1)`: one chain of reasoning steps down to code, no search. **Best-of-N** is `n > 1`, followed by choosing a solution that passes the public test.
+- `n` < 1 → `ValueError`.
+- `best_within_budget(root, generator, config, budget)`: Best-of-N at equal compute. `generator` must be a `CountingGenerator`; rollouts from the root continue until `budget` **more** outputs have been requested (counted from the counter's value at the start), so N adapts to what the other system spent on that problem. The last rollout may overshoot the budget by a few outputs; at least one rollout is always made; stuck rollouts are left out.
+- Choosing the solution: the same `pick_by_branch` as for every system. Without scores every branch value is −1, so it picks the first solution that passes the public tests, exactly like `pick_solution`.
+- Role in the evaluation (§6): Best-of-N is the strong baseline. It filters complete solutions only at the end, with the tests, while the beam search decides at every step which branches to continue; the comparison, at equal numbers of generator calls, measures whether those step-level decisions are worth the rollouts' cost.
+
 ### 4.14 Repair step 🔲 (added value)
 When a terminal node's code fails the public tests, the outcome (input, expected, actual, error) is added to the context and the generator produces a new step analysing the error + fixed code, as a **child of the failed node**.
 
@@ -507,12 +534,52 @@ Same model and same prompt builder as `HFGenerator`, served by vLLM on a cloud G
 
 ## 6. System evaluation
 
-- **Main metric**: percentage of problems solved on the **hidden tests** (pass@1).
-- **Cost**: number of model calls or generated tokens.
+- **Main metric**: percentage of problems solved on the **hidden tests** (pass@1): the system returns one solution, chosen with the public tests only, and it counts as solved if it passes every hidden test.
+- **Cost**: number of **outputs** requested from the generator (`CountingGenerator.outputs`, §4.6b); calls and seconds are recorded too.
 - **Baselines**, compared **at equal compute**:
-  1. single generation;
-  2. **Best-of-N**: N independent complete solutions, keep the one that passes the public tests. A strong baseline for code.
+  1. single generation (`best_of_n(n=1)`);
+  2. **Best-of-N** with the same budget as the beam search on the same problem (`best_within_budget`). A strong baseline for code.
 - Systems to compare: search with rollouts, search with the PRM, with and without the repair step.
+
+### 6.1 Experiment runner ✅
+File: `scripts/run_experiment.py`. Run: `HF_HUB_OFFLINE=1 python -m scripts.run_experiment`; options `--problems` (default 20: the first MBPP test problems), `--rollouts` (default 4, rollouts per node for the beam search), `--output` (default `results/mbpp_pilot.jsonl`). Quick check: `--problems 1 --rollouts 1 --output results/smoke.jsonl` (about 80 s).
+- Loads the model once (`HFGenerator`, seed 0) and the problems with `load_mbpp("test")`; `SearchConfig()` defaults (`[4, 2, 2]`, code branching 2, beam width 2); `CodeExecutor(timeout=2.0)` (MBPP solutions run in milliseconds, so hanging code should not cost 5 s per execution).
+- For each problem, the systems run in this order, each with a fresh `CountingGenerator` around the shared model and a fresh root `ReasoningNode(problem.to_prompt())`:
+  1. `beam`: `beam_search` with a `RolloutEvaluator` built on **the same counter** (so rollouts are counted); candidates = its code nodes;
+  2. `best_of_n`: `best_within_budget` with budget = the outputs the beam just spent on this problem;
+  3. `single`: `best_of_n(n=1)`.
+- `evaluate(leaves, problem, executor)`, identical for every system: `grade_on_public` → `pick_by_branch` → the chosen code on the hidden tests. `passed_public` = some candidate passes the public test; `solved` = the chosen one passes every hidden test (`False` when nothing is chosen).
+- One JSON line per (problem, system): `problem`, `system`, `passed_public`, `solved`, `candidates` (code nodes produced), `outputs`, `calls`, `seconds`. Lines are appended after each problem, so an interruption loses at most the current problem; problems already present in the file are skipped, so the same command resumes a run. (The model's random state then differs from an uninterrupted run.) At the end, a summary per system: solved, passed public, mean outputs, mean seconds — over every row of the file.
+- `results/` is in `.gitignore`.
+
+Smoke run (2026-10-23, `--problems 1 --rollouts 1`, mbpp_11): beam 36 outputs, 38 s, no candidate passing the public test; Best-of-N with the same budget 37 outputs, 11 candidates, solved; single generation 4 outputs, not solved. A single problem with one rollout per node says nothing about the comparison; it only shows that the pipeline runs end to end.
+
+### 6.2 Results: MBPP test split ✅
+Run of 2026-10-23/25: `python -m scripts.run_experiment --problems 239` (then at the project root as `run_experiment.py`) (all 239 convertible MBPP test problems), defaults (`[4, 2, 2]`, code branching 2, beam width 2, 4 rollouts per node), Qwen2.5-Coder-0.5B-Instruct, seed 0, M-series Mac; results in `results/mbpp_pilot.jsonl` (the first 13 problems come from an earlier run of the same command, resumed). Total ≈ 13.5 h (beam 7.6 h, Best-of-N 5.7 h, single 0.2 h).
+
+| System | Solved (hidden tests) | A candidate passes the public test | Passes public, fails hidden | Mean outputs | Mean candidates | Mean seconds |
+|---|---|---|---|---|---|---|
+| Single generation | 87 / 239 (36.4%) | 100 | 13 | 3.4 | 1.0 | 3.5 |
+| Beam search (rollouts) | 146 / 239 (61.1%) | 178 | 32 | 82.0 | 4.2 | 113.9 |
+| Best-of-N (same budget) | **158 / 239 (66.1%)** | 199 | 41 | 83.4 | 23.6 | 85.5 |
+
+Paired comparison (same problems), with a two-sided exact sign test on the problems where the two systems disagree:
+
+| Pair | Both solve | Neither | Only the first | Only the second | p |
+|---|---|---|---|---|---|
+| beam vs Best-of-N | 134 | 69 | 12 | 24 | 0.065 |
+| beam vs single | 81 | 87 | 65 | 6 | < 0.0001 |
+| Best-of-N vs single | 81 | 75 | 77 | 6 | < 0.0001 |
+
+Findings:
+- **Searching pays off**: both the beam search and Best-of-N solve far more problems than single generation (+25 and +30 points), clearly beyond chance.
+- **Best-of-N beats the beam search at equal compute**: 158 vs 146, 24 problems won against 12. The difference is suggestive but not significant at the usual 5% level (p ≈ 0.065) with one run of 239 problems.
+- The budget matching works: Best-of-N spent on average 1.3 outputs more than the beam (at most 3).
+- **Main cause: the beam keeps almost none of the code it writes.** With the same budget, Best-of-N ends with 23.6 candidate solutions per problem, the beam with 4.2: about 90% of the beam's outputs go into rollouts, whose complete solutions are executed only to compute scores and then discarded. Of the 24 problems only Best-of-N solves, in 16 the beam has no candidate passing even the public test.
+- **One public test is a weak filter**: 13–21% of the solutions passing the public test fail the hidden ones (single 13/100, beam 32/178, Best-of-N 41/199). The beam's scores rely on the same public test, so they are fooled in the same way.
+- Limits: one seed, one run, a 0.5B model, the 239-problem subset of MBPP (floating-point problems excluded, §4.8).
+
+Next improvement suggested by these results: keep the code nodes produced by the rollouts as candidate solutions of the beam search (they come from the most promising branches and are already tested), which changes the beam's candidates but not its cost, so the Best-of-N and single-generation rows stay valid and only the beam needs to be re-run.
 
 ---
 
@@ -554,7 +621,7 @@ Same model and same prompt builder as `HFGenerator`, served by vLLM on a cloud G
 | 3b | First real tree on Two Sum: `grow_full_tree`, `grading.py`, `config.num_candidates`, `hf_tree.py` with measurements (§4.10b) | ✅ done |
 | 4 | `Evaluator` + `RolloutEvaluator`, `rollout`, `ReasoningNode.detached_copy`, real-model check `hf_scores.py` | ✅ done |
 | 5 | Beam search (`search/beam.py`, `beam_width` in `SearchConfig`), branch-based solution choice (`pick_by_branch`) | ✅ done (real-model run deferred to the step-6 comparison) |
-| 6 | Baselines (single, Best-of-N) and comparison on MBPP / HumanEval | 🔲 in progress: 6a MBPP adapter ✅; 6b baselines, 6c experiment runner, 6d pilot run to do |
+| 6 | Baselines (single, Best-of-N) and comparison on MBPP (all 239 convertible test problems, §6.2) | ✅ done |
 | 7 | Repair step from errors | 🔲 added value |
 | 8 | Data collection + PRM training (`LearnedPRM`) | 🔲 advanced |
 | 9 | `VLLMGenerator` on a cloud GPU, larger datasets | 🔲 scalability |
