@@ -2,7 +2,7 @@ import time
 
 import pytest
 
-import main as demo
+from scripts import demo
 from reasoning_graphs.execution.executor import CodeExecutor
 from reasoning_graphs.problems.problem import TestCase as Case
 from reasoning_graphs.problems.two_sum import TWO_SUM

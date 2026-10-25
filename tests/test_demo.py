@@ -1,4 +1,4 @@
-import main as demo
+from scripts import demo
 
 
 def test_demo_runs_end_to_end():

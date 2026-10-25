@@ -1,8 +1,8 @@
-"""Grows a full tree on Two Sum with the real model and measures it. Run: HF_HUB_OFFLINE=1 python hf_tree.py"""
+"""Grows a full tree on Two Sum with the real model and measures it. Run: HF_HUB_OFFLINE=1 python -m scripts.hf_tree"""
 import time
 from collections import Counter
 
-from main import print_public_results
+from scripts.demo import print_public_results
 from reasoning_graphs.config import SearchConfig
 from reasoning_graphs.execution.executor import CodeExecutor
 from reasoning_graphs.execution.grading import grade_on_public, pick_solution

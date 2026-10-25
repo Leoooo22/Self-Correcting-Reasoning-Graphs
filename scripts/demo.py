@@ -1,3 +1,4 @@
+"""End-to-end demo on Two Sum with the mock generator (no model needed). Run: python -m scripts.demo"""
 from reasoning_graphs.reasoning_node import ReasoningNode
 from reasoning_graphs.generators.base import MockGenerator
 from reasoning_graphs.config import SearchConfig

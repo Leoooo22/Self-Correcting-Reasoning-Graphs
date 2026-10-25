@@ -1,5 +1,5 @@
 """Scores the first-level branches of Two Sum with rollouts of the real model.
-Run: HF_HUB_OFFLINE=1 python hf_scores.py"""
+Run: HF_HUB_OFFLINE=1 python -m scripts.hf_scores"""
 import time
 
 from reasoning_graphs.config import SearchConfig
@@ -19,7 +19,7 @@ def main():
     executor = CodeExecutor()
     root = ReasoningNode(TWO_SUM.to_prompt())
 
-    # Only the first level is needed: one expansion of the root (the same first call as hf_tree.py)
+    # Only the first level is needed: one expansion of the root (the same first call as scripts/hf_tree.py)
     first_level = expand(root, generator, config)
     evaluator = RolloutEvaluator(generator, config, executor, TWO_SUM, n=NUM_ROLLOUTS)
 
