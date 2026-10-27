@@ -51,6 +51,7 @@ ROOT = TWO_SUM.to_prompt()
     pytest.param(BROKEN_CODE, False, None, id="code with syntax error"),
     pytest.param("Code: def f(a): return a", False, None, id="code without a python block"),
     pytest.param("Code:\n```python\ndef f(a):\n    return a", False, None, id="unclosed code block"),
+    pytest.param("Code:\n```python\n\n```", False, None, id="empty code block"),
     pytest.param("Step 1: Use a hash map.", True, None, id="reasoning step when code is forced"),
     pytest.param(VALID_CODE, True, VALID_CODE, id="code when code is forced"),
 ])

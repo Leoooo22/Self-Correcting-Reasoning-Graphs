@@ -44,6 +44,8 @@ def extract_code(text: str) -> str | None:
     if not match:
         return None
     code = match.group(1).strip()
+    if not code:
+        return None  # an empty block parses fine but is no solution
     try:
         ast.parse(code)
         return code
