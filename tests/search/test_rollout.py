@@ -53,6 +53,18 @@ def test_code_node_is_returned_as_is():
 
     assert rollout(leaf, generator, SearchConfig()) is leaf
     assert generator.calls == []  # the generator is not even called
+    assert leaf.origin is None  # a node of the real tree: it does not come from a rollout
+
+
+def test_code_node_remembers_the_real_node_it_came_from():
+    _, step_1 = make_tree()
+    generator = ScriptedGenerator(["Step 2: More.", "Step 3: Even more.", CODE])
+
+    result = rollout(step_1, generator, SearchConfig())
+
+    assert result.origin is step_1  # the real node, not its detached copy
+    assert result.parent.score is None  # the copies along the way carry no score: origin is the only link
+    assert step_1.origin is None  # nodes of the real tree have no origin
 
 
 def test_real_tree_is_unchanged():

@@ -17,8 +17,11 @@ def pick_solution(leaves: list[ReasoningNode], public_results: dict[int, Executi
 
 
 def branch_value(leaf: ReasoningNode) -> float:
-    """Score of the last reasoning step before the code; -1 (below any real score) if it has none, e.g. the root."""
-    return leaf.parent.score if leaf.parent.score is not None else -1.0
+    """Score of the last scored node on the solution's path: the node a rollout started from (origin) for rollout
+    solutions, whose own path is made of unscored copies, otherwise the parent. -1 (below any real score) if it has
+    no score, e.g. the root."""
+    anchor = leaf.origin if leaf.origin is not None else leaf.parent
+    return anchor.score if anchor.score is not None else -1.0
 
 
 def pick_by_branch(leaves: list[ReasoningNode], public_results: dict[int, ExecutionResult]) -> ReasoningNode | None:

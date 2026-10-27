@@ -13,6 +13,7 @@ def rollout(node: ReasoningNode, generator: StepGenerator, config: SearchConfig)
 
     # One output per step, but the same maximum depth as the real search
     rollout_config = SearchConfig(branching=[1] * config.max_steps, code_branching=1)
+    origin = node
     node = node.detached_copy()
 
     # Always terminates: expand forces code at max depth, and code nodes are terminal
@@ -22,4 +23,5 @@ def rollout(node: ReasoningNode, generator: StepGenerator, config: SearchConfig)
             return None  # invalid output
         node = children[0]
         if node.is_terminal:
+            node.origin = origin
             return node

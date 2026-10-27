@@ -16,7 +16,11 @@ class Evaluator(ABC):
 
 
 class RolloutEvaluator(Evaluator):
-    """Score = fraction of n rollouts from the node whose code passes every PUBLIC test."""
+    """Score = fraction of n rollouts from the node whose code passes every PUBLIC test.
+
+    The passing rollout solutions are kept in rollout_leaves (each with .origin = the scored node), so they can
+    be candidate solutions too. The list grows over every score call: use one evaluator per problem.
+    """
 
     def __init__(self, generator: StepGenerator, config: SearchConfig, executor: CodeExecutor, problem: Problem,
                  n: int = 4):
@@ -27,6 +31,7 @@ class RolloutEvaluator(Evaluator):
         self.executor = executor
         self.problem = problem
         self.n = n
+        self.rollout_leaves = []  # passing rollout solutions, kept instead of discarded
 
     def score(self, node: ReasoningNode) -> float:
         # A code node has no future to sample: its own tests are its score
@@ -36,8 +41,8 @@ class RolloutEvaluator(Evaluator):
         successes = 0
         for _ in range(self.n):
             code_node = rollout(node, self.generator, self.config)
-            # A stuck rollout (None) counts as a failure: it stays in the denominator
             if code_node is not None and self._passes(code_node.code):
+                self.rollout_leaves.append(code_node)
                 successes += 1
         return successes / self.n
 

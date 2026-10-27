@@ -102,3 +102,40 @@ def test_without_scores_pick_by_branch_is_pick_solution():
     results = {leaf.id: fake_result(p) for leaf, p in zip(leaves, [False, True, True])}
     assert pick_by_branch(leaves, results) is pick_solution(leaves, results) is leaves[1]
 
+
+
+def make_rollout_leaf(origin: ReasoningNode) -> ReasoningNode:
+    """A code leaf as a rollout leaves it: on an unscored copy of the path, with .origin = the real node."""
+    copy = origin.detached_copy().add_child("Step 2: more.")
+    leaf = copy.add_child("Code:\n```python\npass\n```")
+    leaf.is_terminal = True
+    leaf.code = "pass"
+    leaf.origin = origin
+    return leaf
+
+
+@pytest.mark.parametrize("origin_score, expected", [
+    pytest.param(0.75, 0.75, id="score of the node the rollout started from"),
+    pytest.param(0.0, 0.0, id="zero is a real score"),
+    pytest.param(None, -1.0, id="unscored origin, e.g. the root in Best-of-N"),
+])
+def test_branch_value_of_a_rollout_solution(origin_score, expected):
+    root = ReasoningNode("Problem: p.")
+    origin = root.add_child("Step 1: plan.") if origin_score is not None else root
+    origin.score = origin_score
+    leaf = make_rollout_leaf(origin)
+
+    assert leaf.parent.score is None  # its parent is an unscored copy...
+    assert branch_value(leaf) == expected  # ...so the origin decides
+
+
+def test_pick_by_branch_mixes_tree_leaves_and_rollout_solutions():
+    root = ReasoningNode("Problem: p.")
+    tree_leaf = make_branch_leaf(root, 0.5)
+    good_origin = root.add_child("Step 1: good plan.")
+    good_origin.score = 1.0
+    rollout_leaf = make_rollout_leaf(good_origin)
+    leaves = [tree_leaf, rollout_leaf]
+    results = {leaf.id: fake_result(True) for leaf in leaves}
+
+    assert pick_by_branch(leaves, results) is rollout_leaf  # comes from the better branch

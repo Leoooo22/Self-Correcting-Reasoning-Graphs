@@ -10,6 +10,7 @@ class ReasoningNode:
         self.children = []
         self.depth = 0 if parent is None else 1 + parent.depth
         self.score = None
+        self.origin = None
         self.code = None
         self.is_terminal = False
 

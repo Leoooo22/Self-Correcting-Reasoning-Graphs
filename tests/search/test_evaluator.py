@@ -81,3 +81,27 @@ def test_real_tree_is_unchanged():
 def test_n_must_be_positive():
     with pytest.raises(ValueError):
         make_evaluator([], n=0)
+
+
+def test_passing_rollout_solutions_are_kept():
+    node = make_step_node()
+    evaluator, _, _ = make_evaluator([code_step(CORRECT), code_step(WRONG), code_step(CORRECT), ""] + [code_step(CORRECT)] * 4)
+
+    evaluator.score(node)
+    assert len(evaluator.rollout_leaves) == 2  # only the passing ones: not the wrong one, not the stuck one
+    assert all(leaf.is_terminal and leaf.origin is node for leaf in evaluator.rollout_leaves)
+
+    other = make_step_node()
+    evaluator.score(other)
+    assert len(evaluator.rollout_leaves) == 6  # the list grows across score calls
+    assert [leaf.origin for leaf in evaluator.rollout_leaves[2:]] == [other] * 4
+
+
+def test_code_nodes_of_the_tree_are_not_added():
+    leaf = make_step_node().add_child(code_step(CORRECT))
+    leaf.is_terminal = True
+    leaf.code = CORRECT
+    evaluator, _, _ = make_evaluator([])
+
+    evaluator.score(leaf)
+    assert evaluator.rollout_leaves == []  # already a candidate as a node of the tree
