@@ -32,14 +32,16 @@ All 239 problems of the [MBPP](https://huggingface.co/datasets/google-research-d
 | System | Solved | Outputs per problem |
 |---|---|---|
 | Single generation | 87 / 239 (36.4%) | 3.4 |
-| Beam search (B = 2, 4 rollouts per node) | 146 / 239 (61.1%) | 82.0 |
-| Best-of-N, same budget as the beam | **158 / 239 (66.1%)** | 83.4 |
+| Beam search (B = 2, 4 rollouts per node), choosing among the tree's leaves | 149 / 239 (62.3%) | 81.7 |
+| **Beam search, also keeping the solutions written by its rollouts** | **162 / 239 (67.8%)** | 81.7 |
+| Best-of-N, same budget as the beam | 158 / 239 (66.1%) | 83.4 |
 
-- Searching pays off: both search methods solve far more problems than a single generation.
-- At equal compute, plain Best-of-N is ahead of the beam search (24 problems won against 12; sign test p ≈ 0.065). The beam ends with about 4 candidate solutions per problem against 24 for Best-of-N, because the complete solutions written during rollouts are used only for scoring and then discarded. Keeping them as candidates is the next step.
-- One public test is a weak filter: 13–21% of the solutions that pass it fail the hidden tests.
+- Searching pays off: every search method solves far more problems than a single generation.
+- Keeping the solutions the rollouts write, instead of using them only for scoring, gives the beam about 5× more candidates at no extra cost: on the same searches it wins 18 problems and loses 5 (sign test p ≈ 0.01).
+- With that, the beam search is on par with Best-of-N at equal compute (17 problems won against 13, p ≈ 0.58): ahead by a margin well within run-to-run noise (two runs of the same beam search differ on 35 problems).
+- One public test is a weak filter: 13–21% of the solutions that pass it fail the hidden tests, and solutions picked from rollouts are fooled more often than tree leaves.
 
-Single run, seed 0, a 0.5B model, about 13.5 hours on an M-series Mac. Details in [SPECIFICATIONS.md](SPECIFICATIONS.md), §6.2.
+Single runs, seed 0, a 0.5B model, about 21 hours on an M-series Mac in total. Details in [SPECIFICATIONS.md](SPECIFICATIONS.md), §6.2–6.3.
 
 ## Getting started
 
@@ -94,7 +96,7 @@ SPECIFICATIONS.md          detailed design and current behavior of every compone
 | Rollout evaluator | done |
 | Beam search, choice of the solution by branch score | done |
 | Baselines and MBPP comparison | done |
-| Beam search keeping rollout solutions as candidates | next |
+| Beam search keeping rollout solutions as candidates | done |
 | Repair step from test errors | planned |
 | Trained process reward model (data from rollouts, LoRA) | planned |
 | vLLM on a cloud GPU, larger datasets | planned |

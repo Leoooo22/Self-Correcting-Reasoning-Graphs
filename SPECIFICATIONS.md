@@ -584,6 +584,32 @@ Findings:
 
 Next improvement suggested by these results: keep the code nodes produced by the rollouts as candidate solutions of the beam search (they come from the most promising branches and are already tested), which changes the beam's candidates but not its cost, so the Best-of-N and single-generation rows stay valid and only the beam needs to be re-run.
 
+### 6.3 Results: beam search keeping rollout solutions ✅
+Run of 2026-10-27/28: `python -m scripts.run_experiment --problems 239 --systems beam beam_rollouts --output results/mbpp_beam_rollouts.jsonl` (same settings as §6.2). One new beam search per problem gives both `beam` (tree leaves only) and `beam_rollouts` (tree leaves + passing rollout solutions). Best-of-N and single generation are the rows of §6.2: their budget matches the new beam search on average (Best-of-N spent 1.6 outputs more per problem on average, 13 in absolute value per problem, since the new search is a new random draw), not problem by problem.
+
+| System | Solved (hidden tests) | Passes public | Passes public, fails hidden | Mean candidates | Mean outputs |
+|---|---|---|---|---|---|
+| Single generation (§6.2) | 87 / 239 (36.4%) | 100 | 13 | 1.0 | 3.4 |
+| Beam search, first run (§6.2) | 146 / 239 (61.1%) | 178 | 32 | 4.2 | 82.0 |
+| Beam search, new run | 149 / 239 (62.3%) | 174 | 25 | 4.2 | 81.7 |
+| **Beam search + rollout solutions** | **162 / 239 (67.8%)** | 204 | 42 | 21.6 | 81.7 |
+| Best-of-N, same budget (§6.2) | 158 / 239 (66.1%) | 199 | 41 | 23.6 | 83.4 |
+
+| Pair | Both | Neither | Only the first | Only the second | p (sign test) |
+|---|---|---|---|---|---|
+| beam (new) vs beam + rollouts — same search | 144 | 72 | 5 | 18 | 0.011 |
+| beam + rollouts vs Best-of-N | 145 | 64 | 17 | 13 | 0.58 |
+| beam, first run vs new run | 130 | 74 | 16 | 19 | 0.74 |
+
+Findings:
+- **Keeping the rollout solutions clearly helps**: on the very same searches, 18 problems gained against 5 lost (p ≈ 0.01), at no extra generation cost. In 30 problems the tree had no candidate passing the public test and a rollout solution did.
+- **The beam search now matches Best-of-N** at equal compute: 162 vs 158 (17 vs 13 problems won). The difference is well within noise (p ≈ 0.58): the two are on par, no longer behind.
+- **Run-to-run noise is large**: two runs of the same beam search differ on 35 problems (146 vs 149 solved). Differences of a few problems between systems are not meaningful on 239 problems.
+- **Where the chosen solution comes from** (`chosen_from`, beam + rollouts): a tree leaf in 152 problems (132 solved, 87%), a rollout solution in 52 (30 solved, 58%), nothing in 35. Chosen rollout solutions fail the hidden tests far more often. In the 5 problems the change lost, a rollout solution was preferred to a tree leaf that was correct: consistent with the imbalance noted in §4.9b, rollout solutions being ranked by a shallower, less informed origin score than the tree leaves' parents.
+- The beam search is slower in wall-clock time than Best-of-N for the same outputs (112 s vs 86 s per problem): many small calls (rollouts) instead of fewer calls of complete solutions.
+
+Possible next refinements: rank rollout solutions below tree leaves at equal branch value, or use an anchor at the same depth for both; more rollouts per node (less noisy scores); several seeds for a reliable comparison.
+
 ---
 
 ## 7. Methodological rules (anti-contamination)
@@ -625,7 +651,7 @@ Next improvement suggested by these results: keep the code nodes produced by the
 | 4 | `Evaluator` + `RolloutEvaluator`, `rollout`, `ReasoningNode.detached_copy`, real-model check `hf_scores.py` | ✅ done |
 | 5 | Beam search (`search/beam.py`, `beam_width` in `SearchConfig`), branch-based solution choice (`pick_by_branch`) | ✅ done (real-model run deferred to the step-6 comparison) |
 | 6 | Baselines (single, Best-of-N) and comparison on MBPP (all 239 convertible test problems, §6.2) | ✅ done |
-| 6+ | Beam search keeping rollout solutions as candidates (`origin`, `rollout_leaves`, `branch_value` via origin, `beam_rollouts` system) | 🔲 in progress: code done, MBPP run to do |
+| 6+ | Beam search keeping rollout solutions as candidates (`origin`, `rollout_leaves`, `branch_value` via origin, `beam_rollouts` system) | ✅ done (§6.3) |
 | 7 | Repair step from errors | 🔲 added value |
 | 8 | Data collection + PRM training (`LearnedPRM`) | 🔲 advanced |
 | 9 | `VLLMGenerator` on a cloud GPU, larger datasets | 🔲 scalability |
